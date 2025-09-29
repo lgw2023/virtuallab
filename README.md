@@ -1,100 +1,114 @@
 # virtuallab
 
-VirtualLab 是一个基于 NetworkX 的轻量级实验编排与知识图谱原型，用于模拟从实验规划、步骤拆解到知识沉淀的最小闭环。当前仓库聚焦于搭建清晰的代码骨架与数据结构，便于后续逐步扩展执行能力与自动连边策略。
+VirtualLab 是一个基于 NetworkX 的轻量级实验编排与知识图谱原型，用于模拟从实验规划、步骤拆解到知识沉淀的最小闭环。仓库当前聚焦于搭建清晰的代码骨架和数据结构，以便后续扩展执行能力、自动连边与持久化。
 
-## 核心调用流程
-
-1. 外部调用统一入口 `VirtualLab_tool(payload)`。
-2. `VirtualLabApp` 利用 `ActionRouter` 将 action 分发到对应的处理函数。
-3. 处理函数通过 `GraphStore` 操作 NetworkX 图，同时向 `EventBus` 追加事件。
-4. 返回值包含标准化的 `result`、`events` 以及本次操作的 `graph_delta`。
+## 快速上手
 
 ```python
 from virtuallab import VirtualLab_tool
 
-plan = VirtualLab_tool({
+response = VirtualLab_tool({
     "action": "create_plan",
     "params": {"name": "异常检测", "goal": "定位销售异常"}
 })
+
+print(response)
+# {
+#     "ok": True,
+#     "result": {"plan_id": "plan_xxx"},
+#     "events": [...],
+#     "graph_delta": {
+#         "added_nodes": [...],
+#         "added_edges": [],
+#         "updated_nodes": [],
+#     },
+# }
 ```
 
-## 代码结构
+调用统一入口 `VirtualLab_tool(payload)`，内部由 `VirtualLabApp` 负责解析 action、分发处理并返回标准化响应：
+
+1. `VirtualLabApp.handle` 校验 action 并读取参数。
+2. `ActionRouter` 将 action 分发至对应处理函数。
+3. 处理函数操作 `GraphStore` 并返回 `GraphDelta`，同时由 `EventBus` 记录事件。
+4. 响应中始终包含 `ok`、`result`、`events` 与结构化的 `graph_delta`。
+
+## 目录结构
 
 ```
 virtuallab/
 ├── __init__.py             # 暴露 VirtualLab_tool
-├── api.py                  # VirtualLabApp 核心应用容器
-├── router.py               # 动作路由与注册
-├── llm.py                  # OpenAI 相关客户端与工具（待整理）
+├── api.py                  # VirtualLabApp 核心应用容器与默认动作实现
+├── router.py               # 动作路由注册与分发
 ├── graph/
 │   ├── ids.py              # ID 与时间戳工具
-│   ├── model.py            # 节点/边定义、GraphDelta
+│   ├── model.py            # 节点/边枚举、GraphDelta、GraphSchema
 │   ├── store.py            # 基于 networkx 的存储封装
-│   ├── query.py            # 结构化查询工具
+│   ├── query.py            # by_type、timeline、neighbors 查询能力
 │   └── rules.py            # 自动连边规则占位
 ├── exec/
 │   ├── runner.py           # StepRunner，负责调用执行适配器
-│   └── adapters/
-│       ├── engineer.py     # Engineer 智能体适配器骨架
-│       ├── local.py        # 本地函数适配器（可注册可调用）
-│       └── openai_model.py # OpenAI Server Model 适配器骨架
+│   └── adapters/           # Engineer、Local、OpenAI Model 等适配器骨架
 ├── knowledge/
-│   └── summarize.py        # 总结服务封装（依赖外部适配器）
+│   └── summarize.py        # SummaryService，对外部总结适配器的轻封装
 ├── obs/
-│   └── events.py           # 事件结构与 append-only EventBus
-└── persist/
-    ├── export.py           # 图谱导出占位实现
-    └── snapshot.py         # 快照/回滚管理
+│   └── events.py           # Event、EventBus，可追加查询事件
+├── persist/
+│   ├── export.py           # GraphExporter，占位支持 JSON/GraphML
+│   └── snapshot.py         # SnapshotManager，提供快照与回滚接口
+└── llm.py                  # OpenAI 相关客户端与工具（占位）
 ```
 
-## 已实现的动作（Actions）
+## 默认动作（Actions）
 
-| Action 名称      | 功能概述 | 备注 |
-|------------------|----------|------|
-| `create_plan`    | 创建 `Plan` 节点并记录基础元数据 | 自动生成 `plan_<uuid>` | 
-| `add_subtask`    | 在指定 Plan 下新增 `Subtask`，并建立 `CONTAINS` 边 | 需要 `plan_id` |
-| `add_step`       | 为子任务新增 `Step` 节点，并与 Subtask 建立 `CONTAINS` 边 | 记录工具类型、输入等属性 |
-| `add_data`       | 创建 `Data` 节点，记录数据来源信息 | 独立节点，无自动连边 |
-| `link`           | 在任意两个节点之间显式创建边 | 支持指定 `EdgeType` 与属性 |
-| `query`          | 基于 `QueryService` 查询图谱 | 支持 `by_type`、`timeline`、`neighbors` 三类 |
+| Action 名称      | 功能概述 | 关键参数 |
+|------------------|----------|----------|
+| `create_plan`    | 创建 `Plan` 节点并写入基础元数据 | `name`, `goal`, `owner`, `status`（可选） |
+| `add_subtask`    | 在 Plan 下新增 `Subtask` 并建立 `CONTAINS` 边 | 必需 `plan_id`，可自定义 `priority` |
+| `add_step`       | 为 Subtask 新增 `Step` 节点并建立 `CONTAINS` 边 | 必需 `subtask_id`，包含工具、输入、状态信息 |
+| `add_data`       | 创建 `Data` 节点，记录数据引用元信息 | 支持记录来源、格式、引用指针 |
+| `link`           | 在任意节点间创建一条有向边 | `source`, `target`, `type`, `attributes` |
+| `query`          | 基于 `QueryService` 查询图谱 | `kind` ∈ {`by_type`, `timeline`, `neighbors`} |
 
-以下 action 已在路由器中占位，当前返回“未实现”提示：`run_step`、`summarize`、`record_note`、`auto_link`、`export_graph`、`snapshot`、`rollback`。
+以下动作已注册占位符，当前会返回「未实现」的提示：`run_step`、`summarize`、`record_note`、`auto_link`、`export_graph`、`snapshot`、`rollback`。
 
-## 图谱模型
+## 图谱模型与操作
 
-### 节点类型
+### 节点与边
 
-- `Plan`：计划或实验项目，包含 `goal`、`owner`、`status` 等基础属性。
-- `Subtask`：Plan 下的任务拆解，维护优先级和状态。
-- `Step`：具体执行步骤，记录执行工具、输入、状态等。
-- `Data`：数据资产引用，可存储外部存储位置、格式等信息。
-- `Result`、`Note`、`Agent`：已在 schema 中预留，尚未由动作生成。
+- 节点类型（`NodeType`）：`Plan`、`Subtask`、`Step`、`Data`，并预留 `Result`、`Note`、`Agent`。
+- 边类型（`EdgeType`）：`CONTAINS`、`USES_DATA`、`PRODUCES`、`DERIVES`、`DEPENDS_ON`、`CAUSED_BY`、`FOLLOWS`、`ASSOCIATED_WITH`。
+- `GraphSchema` 维护各节点/边默认字段，`coerce_node_payload` 与 `coerce_edge_payload` 提供轻量校验工具。
+- `GraphStore` 基于 `networkx.MultiDiGraph`，支持增量 `GraphDelta` 应用与节点、边查询。
 
-所有节点统一具备 `labels`、`created_at`、`updated_at` 等通用字段。
+### 查询服务
 
-### 边类型
+`QueryService` 暴露三类常用模式：
 
-目前 `GraphStore` 支持以下边枚举：`CONTAINS`、`USES_DATA`、`PRODUCES`、`DERIVES`、`DEPENDS_ON`、`CAUSED_BY`、`FOLLOWS`、`ASSOCIATED_WITH`。实际动作只自动创建 `CONTAINS`；其他关系将随着 auto-link/执行模块完善逐步启用。
+- `by_type(node_type, **filters)`：按类型与属性过滤节点。
+- `timeline(scope, include)`：结合 `created_at`/`executed_at` 字段排序，支持按 Plan 或节点类型过滤。
+- `neighbors(node_id, hop=1, edge_types=None)`：遍历指定跳数内邻居，并可限定边类型。
 
-## 查询能力
+### GraphDelta 序列化
 
-- `by_type(type, **filters)`：返回指定类型且满足属性过滤的节点列表。
-- `timeline(scope, include)`：按时间字段排序返回节点，可限定 plan 范围与节点类型。
-- `neighbors(node_id, hop, edge_types)`：遍历指定跳数内的邻居节点。
+`VirtualLabApp` 会将 `GraphDelta` 序列化为三个数组：`added_nodes`、`added_edges`、`updated_nodes`。若无变更则返回空数组，便于外部系统回放。
 
-## 可观测性与扩展点
+## 执行、总结与持久化扩展点
 
-- `EventBus`：每次 action 执行都会写入一条事件，含时间戳、级别与消息。
-- `StepRunner` + 执行适配器：提供注册第三方执行器的接口，但默认未注册任何具体实现。
-- `SummaryService`、`GraphExporter`、`SnapshotManager`：提供知识总结、导出与快照的基础封装，逻辑待接入核心流程。
+- `StepRunner` 维护执行适配器注册表，`run(tool, step_id, payload)` 会分发到具体适配器，实现按工具类型的灵活调度。
+- `SummaryService` 抽象总结能力，调用外部适配器产出结构化结果。
+- `GraphExporter` 与 `SnapshotManager` 分别负责图谱导出与快照回滚，当前实现为占位，可在后续迭代中接入持久化。
 
-## 开发计划
+## 事件与可观测性
 
-短期目标包括：
+`EventBus` 使用 append-only 列表存储事件。每次 action 执行后都会写入包含时间戳、级别、消息与上下文的事件，可通过 `history()` 获取完整时间线，便于调试与追踪。
 
-1. 补全 `run_step`、`summarize` 等核心动作，并串联执行/总结模块。
-2. 实现自动连边规则（时序、依赖、因果）。
-3. 打通持久化导出与快照回滚能力。
-4. 增加端到端使用示例与测试用例。
+## 后续规划
 
-上述结构为后续迭代预留了明确的模块边界，可按需替换或扩展各层能力。
+短期方向包括：
+
+1. 打通 `run_step`、`summarize` 等动作，将执行器与总结服务纳入主流程。
+2. 实现自动连边规则（时序、依赖、因果等）。
+3. 完善导出、快照回滚与外部持久化集成。
+4. 增加端到端示例与测试用例，覆盖典型交互路径。
+
+当前代码骨架为后续迭代预留了清晰的模块边界，可按需替换或扩展各层能力。
