@@ -18,10 +18,43 @@ import subprocess
 import sys
 import time
 from collections import deque
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import psutil
 import requests
+
+EASY_RUN_TOOL_NAMES: Sequence[str] = ("bismark", "cellranger", "flye", "STAR")
+
+LOG_SKIP_STRINGS: Tuple[str, ...] = (
+    "libmamba Cache",
+    "conda info --envs",
+    "EnvironmentNameNotFound",
+    "Using cache",
+    "Transaction",
+    "Prefix: ",
+    "All requested packages already installed",
+    "warning  libmamba",
+    "Checked",
+    "check zst",
+    "/linux-64",
+    "/noarch",
+    "─" * 10,
+    "B  conda-forge",
+    "The following NEW packages will be INSTALLED",
+    "The following packages will be downloaded",
+    "Collecting package metadatas",
+    "Solving environment",
+    "## Package Plan ##",
+    "environment location",
+    "updated specs",
+    "was built under R version",
+    "Loading required package",
+    "Attaching package:",
+    "The following objects are masked",
+    "WARNING",
+)
+
+INTERACTIVE_EDITORS: Tuple[str, ...] = ("nano", "vi", "vim")
 
 def print_colored(text, color=None, do_print=True):
     """Print coloured text with an optional fallback implementation."""
@@ -75,6 +108,32 @@ def print_colored(text, color=None, do_print=True):
 def has_printable_chars(string):
     pattern = re.compile(r"[^\s]")
     return bool(pattern.search(string))
+
+
+def _remove_col_row_tokens(content: str) -> str:
+    return re.sub(r"\b(col|row)\w+\b,?\s*", "", content)
+
+
+def _has_meaningful_text(content: str) -> bool:
+    return not bool(re.match(r"^\s*$|^[^a-zA-Z0-9]*$", content))
+
+
+def _should_skip_log_line(content: str) -> bool:
+    if contains_any(content, LOG_SKIP_STRINGS):
+        return True
+    stripped = content.strip()
+    if not stripped:
+        return True
+    if not _has_meaningful_text(stripped):
+        return True
+    if stripped.endswith("Cached"):
+        return True
+    return False
+
+
+def _contains_any_tool(command_text: str, tools: Iterable[str]) -> bool:
+    lowered = command_text.lower()
+    return any(re.search(rf"\\b{re.escape(tool.lower())}\\b", lowered) for tool in tools)
 
 
 def get_process_tree(proc):
@@ -227,7 +286,7 @@ class ShellRunner:
         self.kill = kill
         self.do_exit = do_exit
         self.llm_test = llm_test
-        self.easyrun_tool = ['bismark', 'cellranger', 'flye', 'STAR']
+        self.easyrun_tools = list(EASY_RUN_TOOL_NAMES)
 
     def print_chars(self, content, type="stdout"):
         target_data = self.stdout_data if type == "stdout" else self.stderr_data
@@ -259,15 +318,8 @@ class ShellRunner:
 
         with open(self.script, 'r') as f:
             bash_content = f.read().lower()
-        pattern_list = []
-        for tool in self.easyrun_tool:
-            p1 = r'(^|\n)' + re.escape(tool) + r'(\s|$)'
-            p2 = r'(?<=\S)[ \t]+' + re.escape(tool) + r'(\s|$)'
-            p3 = r'\b' + re.escape(tool) + r'\b'
-            pattern_list.extend([p1, p2, p3])
-        for pattern in pattern_list:
-            if re.search(pattern, bash_content):
-                return self.easyrun(cmd)
+        if _contains_any_tool(bash_content, self.easyrun_tools):
+            return self.easyrun(cmd)
         self.process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -283,7 +335,7 @@ class ShellRunner:
 # Agent executor implementation (originally genomeagent_module.executor)
 # ---------------------------------------------------------------------------
 
-Easy_Run_tools = ['bismark', 'cellranger', 'flye', 'STAR', 'fastqc']
+Easy_Run_tools = list(EASY_RUN_TOOL_NAMES) + ['fastqc']
 
 OPENMS_tools = ["omssacl", "omssa", "TOPPView", "TOPPAS", "INIFileEditor", "SwathWizard", "FLASHDeconvWizard",
     "File Converter", "FileConverter", "GNPSExport", "IDFileConverter", "MSstatsConverter", "MzTabExporter",
@@ -348,6 +400,7 @@ class AgentCodeExecutor:
         if self.conda_home:
           self.conda_path = os.path.join(self.conda_home, "./bin/conda")
 
+        self.bashcode_prefix: List[str] = []
         if running_env == 'local':
             self.bashcode_prefix = [
                 '#!/bin/bash',
@@ -370,6 +423,9 @@ class AgentCodeExecutor:
                 "export http_proxy=http://127.0.0.1:7890",
                 "export https_proxy=http://127.0.0.1:7890",
             ])
+        install_cmd = 'pip install "smolagents[toolkit]"'
+        if install_cmd not in self.bashcode_prefix:
+            self.bashcode_prefix.append(install_cmd)
 
     def conda_search(self, package_name=None, conda_name=None):
         if not package_name or not conda_name:
@@ -646,59 +702,28 @@ def log_processor(logs, max_stdout_line, max_stderr_line, max_log_len, path_pref
     return processed_logs, stdout, stderr, executor_info
 
 def filter_content(content, type):
-    skip_content = ['libmamba Cache', 'conda info --envs', 'EnvironmentNameNotFound', "Using cache",
-                    'Transaction', 'Prefix: ', 'All requested packages already installed', 'warning  libmamba',
-                    'Checked', 'check zst',
-                    '/linux-64', '/noarch', '─' * 10, 'B  conda-forge',
-                    'The following NEW packages will be INSTALLED', 'The following packages will be downloaded',
-                    'Collecting package metadatas', 'Solving environment', '## Package Plan ##',
-                    'environment location', 'updated specs', 'was built under R version',
-                    'Loading required package', 'Attaching package:', 'The following objects are masked', 'WARNING']
     res = []
     for i in content:
-        if (not contains_any(i, skip_content) and
-                '\n' != i and not bool(re.match(r'^\s*$|^[^a-zA-Z0-9]*$', i)) and
-                sum([x.startswith("col") or x.startswith("row") for x in i.split(", ")]) < 3):
-            res.append(f'[{type}] ' + i.strip())
+        if _should_skip_log_line(i):
+            continue
+        if sum([x.startswith("col") or x.startswith("row") for x in i.split(", ")]) >= 3:
+            continue
+        res.append(f'[{type}] ' + i.strip())
     return res
 
+
 def filter_stdout(content):
-    content = re.sub(r'\b(col|row)\w+\b,?\s*', '', content)
-    skip_content = ['libmamba Cache', 'conda info --envs', 'EnvironmentNameNotFound', "Using cache",
-                    'Transaction', 'Prefix: ', 'All requested packages already installed', 'warning  libmamba',
-                    'Checked', 'check zst',
-                    '/linux-64', '/noarch', '─' * 10, 'B  conda-forge',
-                    'The following NEW packages will be INSTALLED', 'The following packages will be downloaded',
-                    'Collecting package metadatas', 'Solving environment', '## Package Plan ##',
-                    'environment location', 'updated specs', 'was built under R version',
-                    'Loading required package', 'Attaching package:', 'The following objects are masked', 'WARNING']
-    for i in skip_content:
-        if i in content:
-            return True, content
-    if '\n' == content or bool(re.match(r'^\s*$|^[^a-zA-Z0-9]*$', content)):
+    cleaned = _remove_col_row_tokens(content)
+    if _should_skip_log_line(cleaned):
         return True, content
-    if content.strip().endswith('Cached'):
-        return True, content
-    return False, content
+    return False, cleaned
+
 
 def filter_stderr(content):
-    content = re.sub(r'\b(col|row)\w+\b,?\s*', '', content)
-    skip_content = ['libmamba Cache', 'conda info --envs', 'EnvironmentNameNotFound', "Using cache",
-                    'Transaction', 'Prefix: ', 'All requested packages already installed', 'warning  libmamba',
-                    'Checked', 'check zst',
-                    '/linux-64', '/noarch', '─' * 10, 'B  conda-forge',
-                    'The following NEW packages will be INSTALLED', 'The following packages will be downloaded',
-                    'Collecting package metadatas', 'Solving environment', '## Package Plan ##',
-                    'environment location', 'updated specs', 'was built under R version',
-                    'Loading required package', 'Attaching package:', 'The following objects are masked', 'WARNING']
-    for i in skip_content:
-        if i in content:
-            return True, content
-    if '\n' == content or bool(re.match(r'^\s*$|^[^a-zA-Z0-9]*$', content)):
+    cleaned = _remove_col_row_tokens(content)
+    if _should_skip_log_line(cleaned):
         return True, content
-    if content.strip().endswith('Cached'):
-        return True, content
-    return False, content
+    return False, cleaned
 
 
 def code_rule_sudo(bash_code: str, debug: bool = False) -> [bool, str]:
@@ -731,19 +756,17 @@ def code_rule_multiple_python_script(bash_code: str, debug: bool = False) -> [bo
     return True, None
 
 def code_rule_interactive_tool(bash_code: str, debug: bool = False) -> [bool, str]:
-    if (bool(re.search(r'(^|[^a-zA-Z0-9])nano ', bash_code)) or
-            bool(re.search(r'(^|[^a-zA-Z0-9])vi ', bash_code)) or
-            bool(re.search(r'(^|[^a-zA-Z0-9])vim ', bash_code))):
-        if (bool(re.search(r'-nano ', bash_code))
-                or bool(re.search(r'-vi ', bash_code))
-                or bool(re.search(r'-vim ', bash_code))):
-            return True, None
-        else:
+    for editor in INTERACTIVE_EDITORS:
+        pattern = rf'(^|[^a-zA-Z0-9]){editor} '
+        if re.search(pattern, bash_code):
+            if re.search(rf'-{editor} ', bash_code):
+                continue
             print_colored(
-                f'Code Execute Statu: Failed! Using "nano"/"vi"/"vim" is not allowed in a non-interactive environment!',
-                'ORANGE', debug
-                )
-            return False, f'Code Execute Statu: Failed! Using "nano"/"vi"/"vim" is not allowed in a non-interactive environment!'
+                'Code Execute Statu: Failed! Using "nano"/"vi"/"vim" is not allowed in a non-interactive environment!',
+                'ORANGE',
+                debug,
+            )
+            return False, 'Code Execute Statu: Failed! Using "nano"/"vi"/"vim" is not allowed in a non-interactive environment!'
     return True, None
 
 
