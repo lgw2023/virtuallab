@@ -22,6 +22,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 import psutil
 import requests
+from ..config import get_env
 
 EASY_RUN_TOOL_NAMES: Sequence[str] = ("bismark", "cellranger", "flye", "STAR")
 
@@ -416,8 +417,8 @@ class AgentCodeExecutor:
                 "channel_priority: strict",
                 'ssl_verify: false"  >  ~/.condarc',
                 ]
-        if os.getenv("http_proxy_port"):
-            http_proxy_port = os.getenv("http_proxy_port")
+        if get_env("http_proxy_port"):
+            http_proxy_port = get_env("http_proxy_port")
             self.bashcode_prefix.extend([
                 f"conda config --set proxy_servers.http {http_proxy_port}",
                 f"conda config --set proxy_servers.https {http_proxy_port}",
@@ -833,19 +834,33 @@ def block_files_in_log(bash_code, execute_log):
     return False, None
 
 class BashCodeRunToolWrapper:
-    def __init__(self):
-        self.debug = False
-        self.black_list: List[str] = []
-        self.round_times = 0
-        self.max_times_per_round: int = 30
-        self.global_round = 0
-        self.working_dir = ""
-        self.last_status = False
-        self.running_env = "local"
-        self.conda_home = '/Users/liguowei/ubuntu/miniconda3'
-        self.conda_bioenv = 'bioenv'
-        self.conda_renv = 'bioenv'
-        self.do_execute = True
+    def __init__(
+            self,
+            debug = False,
+            black_list: List[str] = [],
+            round_times = 0,
+            max_times_per_round: int = 30,
+            global_round = 0,
+            working_dir = "",
+            last_status = False,
+            running_env = "local",
+            conda_home = '/Users/liguowei/ubuntu/miniconda3',
+            conda_bioenv = 'bioenv',
+            conda_renv = 'bioenv',
+            do_execute = True,
+         ):
+        self.debug = debug
+        self.black_list = black_list
+        self.round_times = round_times
+        self.max_times_per_round = max_times_per_round
+        self.global_round = global_round
+        self.working_dir = working_dir
+        self.last_status = last_status
+        self.running_env = running_env
+        self.conda_home = conda_home
+        self.conda_bioenv = conda_bioenv
+        self.conda_renv = conda_renv
+        self.do_execute = do_execute
 
     def run(self, bash_code: str) -> str:
         """
@@ -983,6 +998,8 @@ class BashCodeRunTool(Tool):
         # 参数透传已在实例化时完成，这里只传递 code
         result = self.runner.run(code)
         return result
+
+bash_code_run_tool = BashCodeRunTool()
 
 if __name__ == "__main__":
     # 默认实例化

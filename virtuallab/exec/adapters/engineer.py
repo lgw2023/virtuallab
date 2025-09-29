@@ -1,6 +1,6 @@
 """Adapter for the Engineer autonomous agent."""
 from __future__ import annotations
-
+import httpx
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Protocol
 
@@ -11,8 +11,8 @@ def _load_smolagents_dependencies() -> dict[str, Any]:
     """Import smolagents lazily and surface a clear error when missing."""
 
     try:
-        from smolagents import CodeAgent, OpenAIServerModel, WebSearchTool
-        from smolagents.tools import PythonInterpreterTool
+        from smolagents import ToolCallingAgent, OpenAIServerModel, WebSearchTool
+        from ...tools.bash_code_run_tool import BashCodeRunTool
     except ModuleNotFoundError as exc:  # pragma: no cover - import guard
         raise ModuleNotFoundError(
             "The 'smolagents' package is required to use the Engineer adapter. "
@@ -20,10 +20,10 @@ def _load_smolagents_dependencies() -> dict[str, Any]:
         ) from exc
 
     return {
-        "CodeAgent": CodeAgent,
+        "ToolCallingAgent": ToolCallingAgent,
         "OpenAIServerModel": OpenAIServerModel,
-        "WebSearchTool": WebSearchTool,
-        "PythonInterpreterTool": PythonInterpreterTool,
+        "WebSearchTool": WebSearchTool(),
+        "ShellBashInterpreterTool": BashCodeRunTool(working_dir="/Users/liguowei/ubuntu/virtuallab/genome"),
     }
 
 
@@ -45,11 +45,11 @@ class SmolagentsEngineerClient:
 
     def __post_init__(self) -> None:
         deps = _load_smolagents_dependencies()
-        self._CodeAgent = deps["CodeAgent"]
+        self._ToolCallingAgent = deps["ToolCallingAgent"]
         self._OpenAIServerModel = deps["OpenAIServerModel"]
         self._tool_registry: Dict[str, Callable[[], Any]] = {
             "web_search": deps["WebSearchTool"],
-            "python": deps["PythonInterpreterTool"],
+            "shell_bash": deps["ShellBashInterpreterTool"],
         }
         if self.tool_factories:
             self._tool_registry.update(self.tool_factories)
@@ -67,7 +67,11 @@ class SmolagentsEngineerClient:
                 "LLM_MODEL, LLM_MODEL_URL, and LLM_MODEL_API_KEY environment variables "
                 "must be set when 'model' is not provided to SmolagentsEngineerClient."
             )
-        return self._OpenAIServerModel(model_id=model_id, api_base=api_base, api_key=api_key)
+        print(f"model_id: {model_id} api_base: {api_base} api_key: {api_key}")
+        return self._OpenAIServerModel(
+            model_id=model_id, api_base=api_base, api_key=api_key,
+            client_kwargs={"http_client": httpx.Client(proxy=get_env('http_proxy_port'), verify=False)}
+        )
 
     def _resolve_tools(self, tools: list[str] | None) -> list[Any]:
         if isinstance(tools, str):
@@ -76,14 +80,14 @@ class SmolagentsEngineerClient:
             tool_names = list(tools) if tools else list(self.default_tools)
         resolved = []
         for name in tool_names:
-            factory = self._tool_registry.get(name)
-            if factory is None:
+            factory_tool = self._tool_registry.get(name)
+            if factory_tool is None:
                 raise KeyError(f"Unknown Engineer tool '{name}'")
-            resolved.append(factory())
+            resolved.append(factory_tool)
         return resolved
 
     def run(self, prompt: str, *, tools: list[str] | None = None) -> str:
-        agent = self._CodeAgent(
+        agent = self._ToolCallingAgent(
             tools=self._resolve_tools(tools),
             model=self.model,
             stream_outputs=self.stream_outputs,

@@ -56,14 +56,14 @@ def make_stub_dependencies():
             return f"ran:{prompt}:{len(self.tools)}"
 
     class StubModel:
-        def __init__(self, *, model_id, api_base, api_key):
-            self.config = (model_id, api_base, api_key)
+        def __init__(self, *, model_id, api_base, api_key, client_kwargs):
+            self.config = (model_id, api_base, api_key, client_kwargs)
 
     return {
-        "CodeAgent": StubAgent,
+        "ToolCallingAgent": StubAgent,
         "OpenAIServerModel": StubModel,
         "WebSearchTool": lambda: "search",
-        "PythonInterpreterTool": lambda: "python",
+        "ShellBashInterpreterTool": lambda: "shell_bash",
     }
 
 
@@ -73,9 +73,9 @@ def test_engineer_client_resolves_tools_and_runs(monkeypatch):
     monkeypatch.setenv("LLM_MODEL_URL", "http://example")
     monkeypatch.setenv("LLM_MODEL_API_KEY", "key")
 
-    client = engineer.SmolagentsEngineerClient(stream_outputs=True)
+    client = engineer.SmolagentsEngineerClient(stream_outputs=False)
 
-    output = client.run("do work", tools=["python", "web_search"])
+    output = client.run("do work", tools=["web_search", "shell_bash"])
     assert output == "ran:do work:2"
 
 
@@ -96,7 +96,13 @@ def test_engineer_adapter_returns_structured_response(monkeypatch):
     stub_client.run.return_value = "result"
 
     adapter = engineer.EngineerAdapter(client=stub_client)
-    response = adapter.run(step_id="s", payload={"text": "prompt", "tools": ["python"]})
+    response = adapter.run(step_id="s", payload={"text": "prompt", "tools": []})
 
     assert response == {"step_id": "s", "output": "result"}
-    stub_client.run.assert_called_once_with("prompt", tools=["python"])
+    stub_client.run.assert_called_once_with("prompt", tools=[])
+
+
+def test_engineer_client_resolves_tools_and_runs_real():
+    client = engineer.SmolagentsEngineerClient(stream_outputs=False)
+    output = client.run("list all files under current dir", tools=["web_search", "shell_bash"])
+    assert isinstance(output, str)
