@@ -285,6 +285,25 @@ def test_timeline_query_orders_by_timestamp(app: VirtualLabApp) -> None:
     assert [item["id"] for item in items] == [plan_id, subtask_id]
 
 
+def test_timeline_scope_includes_plan_node(app: VirtualLabApp) -> None:
+    plan_id = _create_plan(app)
+    _add_subtask(app, plan_id)
+
+    response = app.handle(
+        {
+            "action": "query",
+            "params": {
+                "kind": "timeline",
+                "scope": {"plan_id": plan_id},
+                "include": [NodeType.PLAN.value, NodeType.SUBTASK.value],
+            },
+        }
+    )
+
+    items = response["result"]["items"]
+    assert items[0]["id"] == plan_id
+
+
 def test_handle_requires_action_key(app: VirtualLabApp) -> None:
     with pytest.raises(KeyError, match="action"):
         app.handle({})

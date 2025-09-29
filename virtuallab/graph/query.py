@@ -59,7 +59,7 @@ class QueryService:
                 continue
             if scope:
                 plan_id = scope.get("plan_id")
-                if plan_id and data.get("plan_id") != plan_id and data.get("id") != plan_id:
+                if plan_id and data.get("plan_id") != plan_id and node_id != plan_id:
                     continue
             timestamp = data.get("executed_at") or data.get("created_at")
             nodes.append((timestamp, {"id": node_id, **data}))
