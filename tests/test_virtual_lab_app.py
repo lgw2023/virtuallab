@@ -304,6 +304,38 @@ def test_timeline_scope_includes_plan_node(app: VirtualLabApp) -> None:
     assert items[0]["id"] == plan_id
 
 
+def test_timeline_scope_includes_plan_hierarchy(app: VirtualLabApp) -> None:
+    plan_id = _create_plan(app)
+    subtask_id = _add_subtask(app, plan_id)
+    first_step = _add_step(app, subtask_id, name="Step A")
+    second_step = _add_step(app, subtask_id, name="Step B")
+
+    graph = app.graph_store.graph
+    graph.nodes[plan_id]["created_at"] = "2024-01-01T00:00:00+00:00"
+    graph.nodes[subtask_id]["created_at"] = "2024-01-02T00:00:00+00:00"
+    graph.nodes[first_step]["created_at"] = "2024-01-03T00:00:00+00:00"
+    graph.nodes[second_step]["created_at"] = "2024-01-04T00:00:00+00:00"
+
+    response = app.handle(
+        {
+            "action": "query",
+            "params": {
+                "kind": "timeline",
+                "scope": {"plan_id": plan_id},
+                "include": [
+                    NodeType.PLAN.value,
+                    NodeType.SUBTASK.value,
+                    NodeType.STEP.value,
+                ],
+            },
+        }
+    )
+
+    items = response["result"]["items"]
+    ids = [item["id"] for item in items]
+    assert ids == [plan_id, subtask_id, first_step, second_step]
+
+
 def test_handle_requires_action_key(app: VirtualLabApp) -> None:
     with pytest.raises(KeyError, match="action"):
         app.handle({})

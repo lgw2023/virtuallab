@@ -54,14 +54,43 @@ class QueryService:
 
         nodes = []
         include_types = set(include or [])
+        plan_scope = scope.get("plan_id") if scope else None
+
+        plan_members: Optional[set[str]]
+        if plan_scope:
+            plan_members = self._collect_plan_members(plan_scope)
+        else:
+            plan_members = None
+
         for node_id, data in self.graph.nodes(data=True):
             if include_types and data.get("type") not in include_types:
                 continue
-            if scope:
-                plan_id = scope.get("plan_id")
-                if plan_id and data.get("plan_id") != plan_id and node_id != plan_id:
-                    continue
+            if plan_members is not None and node_id not in plan_members:
+                continue
             timestamp = data.get("executed_at") or data.get("created_at")
             nodes.append((timestamp, {"id": node_id, **data}))
         for _, payload in sorted(nodes, key=lambda item: item[0] or ""):
             yield payload
+
+    def _collect_plan_members(self, plan_id: str) -> set[str]:
+        """Return the set of node identifiers associated with ``plan_id``."""
+
+        members: set[str] = set()
+        if plan_id not in self.graph:
+            return members
+
+        members.add(plan_id)
+        subtasks: set[str] = set()
+
+        for node_id, data in self.graph.nodes(data=True):
+            if data.get("plan_id") == plan_id:
+                members.add(node_id)
+                if data.get("type") == "Subtask":
+                    subtasks.add(node_id)
+
+        for subtask_id in subtasks:
+            for _, target_id, edge_data in self.graph.out_edges(subtask_id, data=True):
+                if edge_data.get("type") == "CONTAINS":
+                    members.add(target_id)
+
+        return members
