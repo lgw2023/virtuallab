@@ -8,6 +8,7 @@ from virtuallab.graph.ids import new_id, utc_now
 from virtuallab.graph.model import EdgeSpec, EdgeType, GraphDelta, NodeSpec, NodeType
 from virtuallab.graph.store import GraphStore
 from virtuallab.graph.query import QueryService
+from virtuallab.graph.rules import AutoLinkProposal, AutoLinkService, OpenAIAutoLinkAdapter
 from virtuallab.obs.events import EventBus
 from virtuallab.router import ActionRouter
 from virtuallab.exec.runner import StepRunner
@@ -23,6 +24,7 @@ class VirtualLabApp:
     router: ActionRouter = field(default_factory=ActionRouter)
     step_runner: StepRunner = field(default_factory=StepRunner)
     summary_service: SummaryService | None = None
+    auto_link_service: AutoLinkService | None = None
 
     def __post_init__(self) -> None:
         if self.summary_service is None:
@@ -35,6 +37,17 @@ class VirtualLabApp:
 
                 adapter = _EchoSummarizer()
             self.summary_service = SummaryService(adapter=adapter)
+        if self.auto_link_service is None:
+            try:
+                adapter = OpenAIAutoLinkAdapter()
+            except RuntimeError:
+                class _NoOpAutoLinkAdapter:
+                    def propose_links(self, *, context):
+                        return AutoLinkProposal(candidates=())
+
+                self.auto_link_service = AutoLinkService(adapter=_NoOpAutoLinkAdapter())
+            else:
+                self.auto_link_service = AutoLinkService(adapter=adapter)
         self._register_default_actions()
         self._register_default_step_adapters()
 
@@ -61,12 +74,12 @@ class VirtualLabApp:
         self.router.register("add_step", self._handle_add_step)
         self.router.register("add_data", self._handle_add_data)
         self.router.register("link", self._handle_link)
+        self.router.register("auto_link", self._handle_auto_link)
         self.router.register("query", self._handle_query)
         self.router.register("run_step", self._handle_run_step)
         self.router.register("summarize", self._handle_summarize)
         for action in (
             "record_note",
-            "auto_link",
             "export_graph",
             "snapshot",
             "rollback",
@@ -214,6 +227,34 @@ class VirtualLabApp:
         self.graph_store.add_edge(edge)
         delta = GraphDelta(added_edges=[edge])
         return {"result": {"edge": {"source": source, "target": target, "type": edge.type.value}}, "graph_delta": delta}
+
+    def _handle_auto_link(self, params: dict) -> dict:
+        if self.auto_link_service is None:
+            raise RuntimeError("Auto-link service is not configured")
+
+        scope = params.get("scope")
+        if scope is not None and not isinstance(scope, dict):
+            raise TypeError("'scope' must be a mapping if provided")
+
+        rules_param = params.get("rules")
+        rule_list: list[str] | None
+        if rules_param is None:
+            rule_list = None
+        elif isinstance(rules_param, str):
+            rule_list = [rules_param]
+        elif isinstance(rules_param, (list, tuple, set)):
+            rule_list = [str(item) for item in rules_param if isinstance(item, str)]
+        else:
+            raise TypeError("'rules' must be a string or an iterable of strings")
+
+        result = self.auto_link_service.generate(
+            graph_store=self.graph_store,
+            scope=scope,
+            rules=rule_list,
+        )
+        delta = result.delta
+        self.graph_store.apply_delta(delta)
+        return {"result": result.to_payload(), "graph_delta": delta}
 
     def _handle_query(self, params: dict) -> dict:
         query = QueryService(self.graph_store.graph)
