@@ -908,3 +908,39 @@ class BashCodeRunToolWrapper:
         else:
             print_colored(f'### Code Execute Statu: Success {execute_statu}!', 'ORANGE', self.debug)
             return f'Code Execute Statu: Success!'
+
+
+from smolagents import Tool
+
+class BashCodeRunTool(Tool):
+    name = "bash_code_runner"
+    description = """Executes Bash commands in an automated Linux environment and returns the result status."""
+    inputs = {
+        "code": {
+            "type": "string",
+            "description": "The Bash command or script to execute, e.g., 'ls -l' or 'echo $VAR'.",
+        }
+    }
+    output_type = "string"
+    runner = BashCodeRunToolWrapper(debug = False,
+        black_list = [],
+        round_times = 0,
+        max_times_per_round = 30,
+        global_round = 0,
+        working_dir = "path/to/working_dir",
+        last_status = False,
+        running_env = "local",
+        conda_home = '/Users/liguowei/ubuntu/miniconda3',
+        conda_bioenv = 'bioenv',
+        conda_renv = 'bioenv',
+        do_execute = True)
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, code: str) -> str:
+        result = self.runner.run(code)
+        return result
+
+if __name__ == "__main__":
+    bash_code_run_tool = BashCodeRunTool()
