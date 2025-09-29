@@ -1,5 +1,5 @@
 """Knowledge management utilities for VirtualLab."""
 
-from .summarize import SummaryService
+from .summarize import OpenAILLMSummarizerAdapter, SummaryService
 
-__all__ = ["SummaryService"]
+__all__ = ["SummaryService", "OpenAILLMSummarizerAdapter"]
