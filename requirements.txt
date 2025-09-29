@@ -4,3 +4,4 @@ python-dotenv>=1.0.1
 numpy>=1.26
 openai>=1.51
 tenacity>=8.2
+smolagents[toolkit]
