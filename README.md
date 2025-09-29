@@ -67,11 +67,34 @@ virtuallab/
 | `add_step`       | 为 Subtask 新增 `Step` 节点并建立 `CONTAINS` 边 | 必需 `subtask_id`，包含工具、输入、状态信息 |
 | `add_data`       | 创建 `Data` 节点，记录数据引用元信息 | 支持记录来源、格式、引用指针 |
 | `link`           | 在任意节点间创建一条有向边 | `source`, `target`, `type`, `attributes` |
+| `auto_link`      | 调用自动连边服务，基于 LLM 推理推荐新增边 | `scope`（可选）、`rules`（可选） |
 | `query`          | 基于 `QueryService` 查询图谱 | `kind` ∈ {`by_type`, `timeline`, `neighbors`} |
 | `run_step`       | 通过 `StepRunner` 调用执行适配器并回写步骤结果 | `step_id`, `tool`（可选，默认读取节点）, `payload` |
 | `summarize`      | 使用 `SummaryService` 调用外部 LLM 生成总结，可选写回图谱 | `text`, `style`（可选）, `target_id`（可选） |
 
-以下动作已注册占位符，当前会返回「未实现」的提示：`record_note`、`auto_link`、`export_graph`、`snapshot`、`rollback`。
+以下动作已注册占位符，当前会返回「未实现」的提示：`record_note`、`export_graph`、`snapshot`、`rollback`。
+
+## 自动连边（Auto Link）
+
+自动连边能力由 `AutoLinkService` 与可插拔的 `AutoLinkAdapter` 共同驱动。适配器会收到包含节点、已存在的边、上下文范围与规则清单的结构化快照，并通过大模型推理产出候选边。
+
+- 默认适配器 `OpenAIAutoLinkAdapter` 会调用 OpenAI 兼容接口，根据传入的时序、依赖、因果等规则提示模型输出符合图谱语义的连边建议。
+- 当环境中未配置 OpenAI 依赖时，系统会自动降级为 no-op 适配器，保持 API 行为稳定，可在测试中注入自定义适配器。
+- 服务会自动去重、校验节点是否存在，并把新边包装为 `GraphDelta` 返回，便于外部消费。
+
+示例调用：
+
+```python
+response = VirtualLab_tool({
+    "action": "auto_link",
+    "params": {
+        "scope": {"plan_id": "plan_xxx"},
+        "rules": ["temporal", "dependency"],
+    },
+})
+
+print(response["result"]["applied"])  # [{'source': 'step_a', 'target': 'step_b', 'type': 'FOLLOWS', ...}]
+```
 
 ## 图谱模型与操作
 
@@ -108,7 +131,7 @@ virtuallab/
 
 短期方向包括：
 
-1. 实现自动连边规则（时序、依赖、因果等）。
+1. 扩展自动连边提示模板与领域特定示例，提高多学科泛化能力。
 2. 完善导出、快照回滚与外部持久化集成。
 3. 增加端到端示例与测试用例，覆盖典型交互路径。
 4. 提供更多执行与总结适配器样例，支持异步与流式场景。
