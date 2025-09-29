@@ -78,8 +78,8 @@ class VirtualLabApp:
         self.router.register("query", self._handle_query)
         self.router.register("run_step", self._handle_run_step)
         self.router.register("summarize", self._handle_summarize)
+        self.router.register("record_note", self._handle_record_note)
         for action in (
-            "record_note",
             "export_graph",
             "snapshot",
             "rollback",
@@ -212,6 +212,61 @@ class VirtualLabApp:
         self.graph_store.add_node(node)
         delta = GraphDelta(added_nodes=[node])
         return {"result": {"data_id": data_id}, "graph_delta": delta}
+
+    def _handle_record_note(self, params: dict) -> dict:
+        note_id = params.get("id") or new_id("note")
+        content = params.get("content")
+        if not content:
+            raise KeyError("'content' is required")
+
+        tags_param = params.get("tags")
+        if tags_param is None:
+            tags: list[str] = []
+        elif isinstance(tags_param, (list, tuple, set)):
+            tags = [str(tag) for tag in tags_param]
+        else:
+            tags = [str(tags_param)]
+
+        linked_param = params.get("linked_to")
+        if linked_param is None:
+            linked_to: list[str] = []
+        elif isinstance(linked_param, (list, tuple, set)):
+            linked_to = [str(target) for target in linked_param]
+        else:
+            linked_to = [str(linked_param)]
+
+        now = utc_now()
+        attributes = {
+            "content": content,
+            "tags": tags,
+            "linked_to": linked_to,
+            "created_at": now,
+            "updated_at": now,
+            "labels": params.get("labels", []),
+        }
+
+        node = NodeSpec(id=note_id, type=NodeType.NOTE, attributes=attributes)
+
+        edge_type_value = params.get("edge_type") or EdgeType.ASSOCIATED_WITH.value
+        edge_type = EdgeType(edge_type_value)
+        edge_attributes = params.get("edge_attributes", {})
+
+        edges: list[EdgeSpec] = []
+        for target_id in linked_to:
+            if not self.graph_store.get_node(target_id):
+                raise KeyError(f"Linked target '{target_id}' does not exist")
+            edge = EdgeSpec(
+                source=note_id,
+                target=target_id,
+                type=edge_type,
+                attributes=dict(edge_attributes),
+            )
+            edges.append(edge)
+
+        delta = GraphDelta(added_nodes=[node], added_edges=edges)
+        self.graph_store.apply_delta(delta)
+
+        return {"result": {"note_id": note_id, "graph_delta": self._serialize_graph_delta(delta)}, "graph_delta": delta}
 
     def _handle_link(self, params: dict) -> dict:
         source = params.get("source")
