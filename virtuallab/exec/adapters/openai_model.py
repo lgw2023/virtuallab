@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -25,6 +24,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from ...config import get_env
+
 if sys.version_info < (3, 9):  # pragma: no cover - Python version guard
     from typing import AsyncIterator
 else:  # pragma: no cover - Python version guard
@@ -32,7 +33,7 @@ else:  # pragma: no cover - Python version guard
 
 logger = logging.getLogger(__name__)
 
-VERBOSE_DEBUG = os.getenv("VERBOSE", "false").lower() == "true"
+VERBOSE_DEBUG = get_env("VERBOSE", "false").lower() == "true"
 
 
 def verbose_debug(msg: str, *args: Any, **kwargs: Any) -> None:
@@ -174,25 +175,24 @@ def create_openai_async_client(
     """Create an :class:`AsyncOpenAI` client using explicit or environment configuration."""
 
     if not api_key:
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = get_env("OPENAI_API_KEY")
 
     if client_configs is None:
         client_configs = {}
 
+    proxy_port = get_env("http_proxy_port")
     merged_configs: dict[str, Any] = {
         **client_configs,
         "api_key": api_key,
-        "http_client": httpx.AsyncClient(
-            proxy=os.getenv("http_proxy_port"), verify=False
-        )
-        if os.getenv("http_proxy_port")
+        "http_client": httpx.AsyncClient(proxy=proxy_port, verify=False)
+        if proxy_port
         else None,
     }
 
     if base_url is not None:
         merged_configs["base_url"] = base_url
     else:
-        merged_configs["base_url"] = os.getenv(
+        merged_configs["base_url"] = get_env(
             "OPENAI_API_URL", "https://api.openai.com/v1"
         )
 
@@ -226,7 +226,7 @@ async def openai_complete_if_cache(
         history_messages = []
 
     if not model:
-        model = os.getenv("OPENAI_API_MODEL")
+        model = get_env("OPENAI_API_MODEL")
     if not model:
         raise ValueError(f"OPENAI_API_MODEL is not set or is invalid: {model}")
 
@@ -235,8 +235,8 @@ async def openai_complete_if_cache(
 
     client_configs = kwargs.pop("openai_client_configs", {})
     openai_async_client = create_openai_async_client(
-        api_key=api_key or os.getenv("OPENAI_API_KEY"),
-        base_url=base_url or os.getenv("OPENAI_API_URL"),
+        api_key=api_key or get_env("OPENAI_API_KEY"),
+        base_url=base_url or get_env("OPENAI_API_URL"),
         client_configs=client_configs,
     )
 
@@ -424,7 +424,7 @@ async def openai_complete(
     keyword_extraction = kwargs.pop("keyword_extraction", None)
     if keyword_extraction:
         kwargs["response_format"] = "json"
-    model_name = os.getenv("OPENAI_API_MODEL")
+    model_name = get_env("OPENAI_API_MODEL")
     if not model_name:
         raise ValueError(
             f"llm_model_name is not set or is invalid: {model_name}\n{kwargs}"
@@ -525,14 +525,14 @@ async def openai_embed(
     max_attempts = 50
 
     openai_async_client = create_openai_async_client(
-        api_key=api_key or os.getenv("EMBEDDING_BINDING_API_KEY"),
-        base_url=base_url or os.getenv("EMBEDDING_BINDING_URL"),
+        api_key=api_key or get_env("EMBEDDING_BINDING_API_KEY"),
+        base_url=base_url or get_env("EMBEDDING_BINDING_URL"),
         client_configs=client_configs,
     )
 
     expected_dim = None
     try:
-        expected_dim_env = os.getenv("EMBEDDING_DIM")
+        expected_dim_env = get_env("EMBEDDING_DIM")
         if expected_dim_env:
             expected_dim = int(expected_dim_env)
     except Exception:
@@ -560,7 +560,7 @@ async def openai_embed(
         for attempt in range(1, max_attempts + 1):
             try:
                 response = await openai_async_client.embeddings.create(
-                    model=os.getenv("EMBEDDING_MODEL") or model,
+                    model=get_env("EMBEDDING_MODEL") or model,
                     input=texts,
                     encoding_format="float",
                 )

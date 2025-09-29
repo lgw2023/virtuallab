@@ -1,9 +1,10 @@
 """Adapter for the Engineer autonomous agent."""
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Protocol
+
+from ...config import get_env
 
 
 def _load_smolagents_dependencies() -> dict[str, Any]:
@@ -58,9 +59,9 @@ class SmolagentsEngineerClient:
     def _create_default_model(self) -> Any:
         """Instantiate :class:`OpenAIServerModel` using environment variables."""
 
-        model_id = os.environ.get("LLM_MODEL")
-        api_base = os.environ.get("LLM_MODEL_URL")
-        api_key = os.environ.get("LLM_MODEL_API_KEY")
+        model_id = get_env("LLM_MODEL")
+        api_base = get_env("LLM_MODEL_URL")
+        api_key = get_env("LLM_MODEL_API_KEY")
         if not model_id or not api_base or not api_key:
             raise EnvironmentError(
                 "LLM_MODEL, LLM_MODEL_URL, and LLM_MODEL_API_KEY environment variables "
