@@ -86,6 +86,60 @@ def _add_step(app: VirtualLabApp, subtask_id: str, **overrides) -> str:
     return response["result"]["step_id"]
 
 
+def test_record_note_creates_note_node(app: VirtualLabApp) -> None:
+    response = app.handle(
+        {
+            "action": "record_note",
+            "params": {"content": "Observation", "tags": ["daily", "lab"]},
+        }
+    )
+
+    note_id = response["result"]["note_id"]
+    node = app.graph_store.get_node(note_id)
+    assert node is not None
+    assert node.type is NodeType.NOTE
+    assert node.attributes["content"] == "Observation"
+    assert response["result"]["graph_delta"]["added_nodes"][0]["id"] == note_id
+
+
+def test_record_note_links_to_targets(app: VirtualLabApp) -> None:
+    plan_id = _create_plan(app)
+
+    response = app.handle(
+        {
+            "action": "record_note",
+            "params": {
+                "content": "Plan review",
+                "linked_to": [plan_id],
+                "edge_attributes": {"score": 0.9},
+            },
+        }
+    )
+
+    note_id = response["result"]["note_id"]
+    edge_delta = response["graph_delta"]["added_edges"][0]
+    assert edge_delta == {
+        "source": note_id,
+        "target": plan_id,
+        "type": EdgeType.ASSOCIATED_WITH.value,
+        "attributes": {"score": 0.9},
+    }
+
+    edge_data = app.graph_store.graph.get_edge_data(note_id, plan_id)
+    assert edge_data is not None
+    assert EdgeType.ASSOCIATED_WITH.value in edge_data
+
+
+def test_record_note_rejects_unknown_link_targets(app: VirtualLabApp) -> None:
+    with pytest.raises(KeyError, match="does not exist"):
+        app.handle(
+            {
+                "action": "record_note",
+                "params": {"content": "Unknown link", "linked_to": ["missing"]},
+            }
+        )
+
+
 def test_create_plan_registers_node(app: VirtualLabApp) -> None:
     response = app.handle(
         {
