@@ -417,15 +417,13 @@ class AgentCodeExecutor:
                 'ssl_verify: false"  >  ~/.condarc',
                 ]
         if os.getenv("http_proxy_port"):
+            http_proxy_port = os.getenv("http_proxy_port")
             self.bashcode_prefix.extend([
-                "conda config --set proxy_servers.http http://127.0.0.1:7890",
-                "conda config --set proxy_servers.https http://127.0.0.1:7890",
-                "export http_proxy=http://127.0.0.1:7890",
-                "export https_proxy=http://127.0.0.1:7890",
+                f"conda config --set proxy_servers.http {http_proxy_port}",
+                f"conda config --set proxy_servers.https {http_proxy_port}",
+                f"export http_proxy={http_proxy_port}",
+                f"export https_proxy={http_proxy_port}",
             ])
-        install_cmd = 'pip install "smolagents[toolkit]"'
-        if install_cmd not in self.bashcode_prefix:
-            self.bashcode_prefix.append(install_cmd)
 
     def conda_search(self, package_name=None, conda_name=None):
         if not package_name or not conda_name:
@@ -945,25 +943,50 @@ class BashCodeRunTool(Tool):
         }
     }
     output_type = "string"
-    runner = BashCodeRunToolWrapper(debug = False,
-        black_list = [],
-        round_times = 0,
-        max_times_per_round = 30,
-        global_round = 0,
-        working_dir = "path/to/working_dir",
-        last_status = False,
-        running_env = "local",
-        conda_home = '/Users/liguowei/ubuntu/miniconda3',
-        conda_bioenv = 'bioenv',
-        conda_renv = 'bioenv',
-        do_execute = True)
 
-    def __init__(self):
+    def __init__(
+        self,
+        debug=False,
+        black_list=None,
+        round_times=0,
+        max_times_per_round=30,
+        global_round=0,
+        working_dir="/Users/liguowei/ubuntu/virtuallab/genome",
+        last_status=False,
+        running_env="local",
+        conda_home='/Users/liguowei/ubuntu/miniconda3',
+        conda_bioenv='bioenv',
+        conda_renv='bioenv',
+        do_execute=True,
+        **kwargs
+    ):
         super().__init__()
+        if black_list is None:
+            black_list = []
+        self.runner = BashCodeRunToolWrapper(
+            debug=debug,
+            black_list=black_list,
+            round_times=round_times,
+            max_times_per_round=max_times_per_round,
+            global_round=global_round,
+            working_dir=working_dir,
+            last_status=last_status,
+            running_env=running_env,
+            conda_home=conda_home,
+            conda_bioenv=conda_bioenv,
+            conda_renv=conda_renv,
+            do_execute=do_execute,
+            **kwargs
+        )
 
     def forward(self, code: str) -> str:
+        # 参数透传已在实例化时完成，这里只传递 code
         result = self.runner.run(code)
         return result
 
 if __name__ == "__main__":
+    # 默认实例化
     bash_code_run_tool = BashCodeRunTool()
+    # 传递部分参数的实例化样例
+    bash_code_run_tool_debug = BashCodeRunTool(debug=True)
+    bash_code_run_tool_custom_dir = BashCodeRunTool(working_dir="/tmp/test_bash_tool", max_times_per_round=10)
