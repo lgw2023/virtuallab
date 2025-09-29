@@ -93,6 +93,8 @@ class VirtualLabApp:
         plan_id = params.get("plan_id")
         if not plan_id:
             raise KeyError("'plan_id' is required")
+        if not self.graph_store.get_node(plan_id):
+            raise KeyError(f"Plan '{plan_id}' does not exist")
         subtask_id = params.get("id") or new_id("subtask")
         now = utc_now()
         node = NodeSpec(
@@ -123,6 +125,8 @@ class VirtualLabApp:
         subtask_id = params.get("subtask_id")
         if not subtask_id:
             raise KeyError("'subtask_id' is required")
+        if not self.graph_store.get_node(subtask_id):
+            raise KeyError(f"Subtask '{subtask_id}' does not exist")
         step_id = params.get("id") or new_id("step")
         now = utc_now()
         node = NodeSpec(
@@ -175,6 +179,10 @@ class VirtualLabApp:
         target = params.get("target")
         if not source or not target:
             raise KeyError("'source' and 'target' are required")
+        if not self.graph_store.get_node(source):
+            raise KeyError(f"Source node '{source}' does not exist")
+        if not self.graph_store.get_node(target):
+            raise KeyError(f"Target node '{target}' does not exist")
         edge_type = EdgeType(params.get("type", EdgeType.ASSOCIATED_WITH.value))
         edge = EdgeSpec(source=source, target=target, type=edge_type, attributes=params.get("attributes", {}))
         self.graph_store.add_edge(edge)
