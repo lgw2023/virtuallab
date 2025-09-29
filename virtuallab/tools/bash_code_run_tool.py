@@ -23,17 +23,8 @@ from typing import Dict, List, Tuple
 import psutil
 import requests
 
-try:  # pragma: no cover - optional dependency on original utils module
-    from .genomeagent_module.utils import print_colored as _external_print_colored
-except Exception:  # pragma: no cover - fallback when copying standalone file
-    _external_print_colored = None
-
-
 def print_colored(text, color=None, do_print=True):
     """Print coloured text with an optional fallback implementation."""
-
-    if _external_print_colored is not None:
-        return _external_print_colored(text, color=color, do_print=do_print)
 
     color_dict = {
         "BLUE": "\033[34m",
@@ -330,9 +321,9 @@ class AgentCodeExecutor:
             self,
             running_env='local',
             black_list=[],
-            conda_home=None,
+            conda_home='/Users/liguowei/ubuntu/miniconda3',
             conda_bioenv='bioenv',
-            conda_renv='Renv',
+            conda_renv='bioenv',
             max_log_len=4096,
             max_stdout_line=30,
             max_stderr_line=80,
@@ -357,58 +348,28 @@ class AgentCodeExecutor:
         if self.conda_home:
           self.conda_path = os.path.join(self.conda_home, "./bin/conda")
 
-        # eiflow setting
-        self.eiflow = EIFlow
-        if self.eiflow is not None:
-            if running_env != 'eiflow':
-                raise ValueError('EIFlow must be running on eiflow')
-            self.eiflow.health_tool = self.eiflow.job_params['health_tool']
-            self.eiflow.workflow_id = self.eiflow.workflow_params["workflow_id"]
-            self.eiflow.project_name = self.eiflow.job_params['project_name']
-            self.eiflow.obs_working_path = self.eiflow.job_params['obs_working_path']
-            self.eiflow.obs_loading_path = self.eiflow.job_params['obs_loading_path']
-            self.eiflow.job_output_path = self.eiflow.job_params['job_output_path']
-            self.eiflow.workflow_task_name = self.eiflow.workflow_params['tasks'][0]['task_name']
-            self.bashcode_prefix = [
-                '#!/usr/bin/bash',
-                'set -e',
-                'shopt -s expand_aliases',
-                f"cd {self.eiflow.obs_working_path}",
-                f'eval "$({self.conda_home}conda shell.bash hook)"',
-                'echo "channels:',
-                "  - conda-forge",
-                "  - bioconda",
-                "  - defaults",
-                "channel_priority: strict",
-                'ssl_verify: false"  >  ~/.condarc',
-                "conda activate bioenv"
-            ]
-
         if running_env == 'local':
-            # if not check_and_create_conda(conda_path=self.conda_path, conda_home=self.conda_home):
-            #     raise ValueError(f'conda is not installed, neither failed to install it automatically')
-            # if not check_and_create_conda_env(conda_path=self.conda_path, env_name=self.conda_bioenv):
-            #     raise ValueError(f'bioenv is not installed, neither failed to install it automatically')
-            # if not check_and_create_conda_env(conda_path=self.conda_path, env_name=self.conda_renv):
-            #     raise ValueError(f'Renv is not installed, neither failed to install it automatically')
             self.bashcode_prefix = [
-                '#!/usr/bin/bash',
+                '#!/bin/bash',
                 'set -e',
-                'shopt -s expand_aliases',
-                f"export MAMBA_ROOT_PREFIX={self.conda_home}",
-                f"export PATH={self.conda_home}bin:{self.conda_home}envs/{self.conda_bioenv}/bin:{self.conda_home}envs/{self.conda_renv}/bin:" + "${PATH}",
-                'eval "$(conda shell.bash hook)"',
+                # 'shopt -s expand_aliases',
+                # f"export MAMBA_ROOT_PREFIX={self.conda_home}",
+                # f"export PATH={self.conda_home}bin:{self.conda_home}envs/{self.conda_bioenv}/bin:{self.conda_home}envs/{self.conda_renv}/bin:" + "${PATH}",
+                # 'eval "$(conda shell.bash hook)"',
                 'echo "channels:',
                 "  - conda-forge",
                 "  - bioconda",
                 "  - defaults",
                 "channel_priority: strict",
                 'ssl_verify: false"  >  ~/.condarc',
-                # "conda config --set proxy_servers.http http://127.0.0.1:7890",
-                # "conda config --set proxy_servers.https http://127.0.0.1:7890",
-                # "export http_proxy=http://127.0.0.1:7890",
-                # "export https_proxy=http://127.0.0.1:7890",
                 ]
+        if os.getenv("http_proxy_port"):
+            self.bashcode_prefix.extend([
+                "conda config --set proxy_servers.http http://127.0.0.1:7890",
+                "conda config --set proxy_servers.https http://127.0.0.1:7890",
+                "export http_proxy=http://127.0.0.1:7890",
+                "export https_proxy=http://127.0.0.1:7890",
+            ])
 
     def conda_search(self, package_name=None, conda_name=None):
         if not package_name or not conda_name:
@@ -507,18 +468,6 @@ class AgentCodeExecutor:
         bash_content = re.sub(r'minimamba', 'miniconda', bash_content)
         bash_content = re.sub(r'source activate', 'conda activate', bash_content)
         bash_content = re.sub(r'mamba activate', 'conda activate', bash_content)
-        bash_content = re.sub(r'java -jar picard.jar', 'picard', bash_content)
-        bash_content = re.sub(r'flye-modules assemble', 'flye-modules assemble --threads 32', bash_content)
-        bash_content = re.sub(r'flye-modules repeat', 'flye-modules repeat --threads 32', bash_content)
-        bash_content = re.sub(r'flye-modules contigger', 'flye-modules contigger --threads 32', bash_content)
-        bash_content = re.sub(r'flye-modules polisher', 'flye-modules polisher --threads 32', bash_content)
-
-        if "hisat2-build" in bash_content and " -p " not in bash_content:
-            bash_content = re.sub(r'hisat2-build', 'hisat2-build -p 16 ', bash_content)
-        if "hisat2 " in bash_content and " -p " not in bash_content:
-            bash_content = re.sub(r'hisat2 ', 'hisat2 -p 4 ', bash_content)
-        if "bwa mem " in bash_content and " -t " not in bash_content:
-            bash_content = re.sub(r'bwa mem ', 'bwa mem -t 8 ', bash_content)
 
         # split bash code to lines
         # 先查找第一个出现的 Rscript 或 python 命令，并提取出来
@@ -546,43 +495,12 @@ class AgentCodeExecutor:
         bash_lines = [command for command in re.split(r'(?:&& |&& \\|\s*;\s*|\n)', bash_content)]
         bash_lines.append(sub_command)
 
-        # skip black list tools in conda
-        for i in ['qualimap', 'openjdk', 'bioconductor-deseq2', 'r-deseq2', 'deseq2', 'r-tidyverse', 'r-biocmanager', 'r-essentials', 'r', 'r-base']:
-            for l in range(len(bash_lines)):
-                if 'install' in bash_lines[l]:
-                    bash_lines[l] = re.sub(rf'(mamba insta.*) {i} (.*)', rf'\1 fastqc \2', bash_lines[l], flags=re.IGNORECASE)
-
         # process installed tools and Rscript related tools
         if any(keyword in bash_content_raw for keyword in ['Rscript', 'requireNamespace', 'install.packages', '::install', 'BiocManager']):
             bash_lines = [f"conda activate {self.conda_renv}"] + bash_lines
-            for i in range(len(bash_lines)):
-                content = bash_lines[i]
-                if "R --no-save" in content and "echo '" in content:
-                    content = content.replace("echo '", "echo 'options(repos = c(CRAN = \"https://mirrors.sustech.edu.cn/CRAN/\"));")
-                if "R --no-save" in content and 'echo "' in content:
-                    content = content.replace('echo "', 'echo "options(repos = c(CRAN = \'https://mirrors.sustech.edu.cn/CRAN/\'));')
-                bash_lines[i] = content
             # skip all conda install tools when using R
             installed_list = self.conda_list(conda_home=self.conda_home, conda_env=self.conda_renv)
             bash_content = self.conda_install_cmd_replace(bash_lines, installed_list, pseudo='fastqc', remove=True)
-            # skip tools in R CRAN
-            bash_content = re.sub(r'install.packages\(\'(.+?)\'.*?\)', 'install.packages(\'ggplot2\')', bash_content, flags=re.IGNORECASE, count=0)
-            bash_content = re.sub(r'install.packages\(\"(.+?)\".*?\)', 'install.packages(\"ggplot2\")', bash_content, flags=re.IGNORECASE, count=0)
-            bash_content = re.sub(r'install\(\'(.+?)\'.*?\)', 'install(\'ggplot2\')', bash_content, flags=re.IGNORECASE, count=0)
-            bash_content = re.sub(r'install\(\"(.+?)\".*?\)', 'install(\"ggplot2\")', bash_content, flags=re.IGNORECASE, count=0)
-            bash_content = re.sub(r"install\(c\(('.*?)\).*?\)", lambda match: "install(c(" + ", ".join(["'ggplot2'"] * len(re.findall(r"'([^']*)'", match.group(1)))) + "))", bash_content, flags=re.IGNORECASE, count=0)
-            bash_content = re.sub(r'install\(c\((".*?)\).*?\)', lambda match: 'install(c(' + ', '.join(['"ggplot2"'] * len(re.findall(r'"([^"]*)"', match.group(1)))) + '))', bash_content, flags=re.IGNORECASE, count=0)
-            bash_content = re.sub(r'https://cloud.r-project.org/', 'https://mirrors.sustech.edu.cn/CRAN/', bash_content, flags=re.IGNORECASE, count=0)
-            bash_content = re.sub(r'BiocManager::install', 'install.packages', bash_content, flags=re.IGNORECASE, count=0)
-
-            # add CRAN source
-            if 'Rscript -e "' in bash_content:
-                bash_content = bash_content.replace('Rscript -e "', 'Rscript -e "options(repos = c(CRAN = \'https://mirrors.sustech.edu.cn/CRAN/\'));')
-                bash_content = re.sub(r"library(enrichR)", "Sys.setenv(CURL_CA_BUNDLE = '/etc/ssl/certs/ca-certificates.crt');Sys.setenv(SSL_CERT_FILE = '/usr/local/share/ca-certificates/www.mountsinai.org.crt');library(enrichR)", bash_content, flags=re.IGNORECASE, count=0)
-            if "Rscript -e '" in bash_content:
-                bash_content = bash_content.replace("Rscript -e '", "Rscript -e 'options(repos = c(CRAN = \"https://mirrors.sustech.edu.cn/CRAN/\"));")
-                bash_content = re.sub(r'library(enrichR)', 'Sys.setenv(CURL_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt");Sys.setenv(SSL_CERT_FILE = "/usr/local/share/ca-certificates/www.mountsinai.org.crt");library(enrichR)', bash_content, flags=re.IGNORECASE, count=0)
-
             for i in self.conda_search(package_name=None, conda_name=self.conda_renv):
                 self.bashcode_prefix.append(i)
             self.bashcode_prefix.append(f"conda activate {self.conda_renv}")
@@ -593,11 +511,6 @@ class AgentCodeExecutor:
             bash_content = self.conda_install_cmd_replace(bash_lines, installed_list, pseudo='fastqc', remove=True)
             for i in self.conda_search(package_name=None, conda_name=self.conda_bioenv):
                 self.bashcode_prefix.append(i)
-        if "import scanpy" in bash_content or "import squidpy" in bash_content or "import tangram" in bash_content or "import anndata" in bash_content:
-            if "conda activate" in bash_content:
-                bash_content = re.sub(r' bioenv.*?(\s)', r' base\1', bash_content)
-            else:
-                bash_content = "conda activate base\n" + bash_content
         for openms in OPENMS_tools:
             if openms.lower() in bash_content.lower():
                 if "conda activate" in bash_content:
@@ -605,11 +518,6 @@ class AgentCodeExecutor:
                 else:
                     bash_content = "conda activate protein\n" + bash_content
             break
-        if "medaka" in bash_content:
-            if "conda activate" in bash_content:
-                bash_content = re.sub(r' bioenv.*?(\s)', r' medaka\1', bash_content)
-            else:
-                bash_content = "conda activate medaka\n" + bash_content
         return bash_content
 
     def write_modify_code(self, job_shell):
@@ -631,91 +539,7 @@ class AgentCodeExecutor:
         with os.fdopen(fd, "w") as w:
             for code in self.bashcode_prefix:
                 w.write(code + "\n")
-            # for code in [
-            #     "export PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/local/lib/pkgconfig",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/quast",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/dapars/bin",
-            #     "export PATH=$PATH:/usr/bin/cellranger-4.0.0",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/REDItools2/src/cineca",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/mirdeep2/bin",
-            #     "PERL_MB_OPT='--install_base /home/liguowei/perl5';export PERL_MB_OPT",
-            #     "PERL_MM_OPT='INSTALL_BASE=/home/liguowei/perl5';export PERL_MM_OPT",
-            #     "export PERL5LIB=/root/data/liguowei/GenomeAgent/mirdeep2/lib/perl5",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/mirdeep2/bin",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/CIRI",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/PARalyzer",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/ribotaper/bin",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/pwiz",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/RED-ML/bin",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/cufflinks",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/APAtrap",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/TRF-master/build/src",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/hmmer-3.3.2/build/bin",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/RepeatMasker-master",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/Porechop-master/bin",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/RSEM-1.3.3/build/RSEM/bin",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/SUPPA-2.4",
-            #     "export PATH=$PATH:/mnt/data/liguowei/miniconda3/envs/protein/bin",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/MUMmer3",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/mzmine/bin",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/ont-guppy/bin",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/bin",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/miniasm",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/DaPars2/src",
-            #     "export PATH=/root/data/liguowei/GenomeAgent/meme-5.5.7/meme/bin:/root/data/liguowei/GenomeAgent/meme-5.5.7/meme/libexec/meme-5.5.7:$PATH",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/Filtlong/bin",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/NextDenovo/bin",
-            #     "export PATH=$PATH:/root/data/liguowei/GenomeAgent/NextDenovo",
-            #     "export PATH=$PATH:/mnt/data/liguowei/GenomeAgent/hifiasm",
-            #     "export PATH=/mnt/data/liguowei/GenomeAgent/salmon-latest_linux_x86_64/bin:$PATH",
-            #     "alias circos='conda activate bioenv_circos && /mnt/data/liguowei/miniconda3/envs/bioenv_circos/bin/circos'",
-            #     "alias picard='java -jar /mnt/data/liguowei/GenomeAgent/picard.jar'",
-            #     "alias pilon='java -Xmx128G -jar /mnt/data/liguowei/GenomeAgent/pilon.jar'",
-            #     "alias fusioncatcher='conda activate py27env && /mnt/data/liguowei/GenomeAgent/fusioncatcher/bin/fusioncatcher'",
-            #     "alias clipper='conda activate clipper && /mnt/data/liguowei/miniconda3/envs/clipper/bin/clipper'",
-            #     "alias 'configManta.py'='/usr/bin/python2 /root/manta/bin/configManta.py'",
-            #     "alias 'configManta'='/usr/bin/python2 /root/manta/bin/configManta.py'",
-            #     "alias 'bamclipper'='bamclipper.sh'",
-            #     "alias 'eventClusterer'='/mnt/data/liguowei/GenomeAgent/SUPPA-2.4/eventClusterer.py'",
-            #     "alias 'psiPerGene'='/mnt/data/liguowei/GenomeAgent/SUPPA-2.4/psiPerGene.py'",
-            #     "alias 'eventGenerator'='/mnt/data/liguowei/GenomeAgent/SUPPA-2.4/eventGenerator.py'",
-            #     "alias 'multipleFieldSelection'='/mnt/data/liguowei/GenomeAgent/SUPPA-2.4/multipleFieldSelection.py'",
-            #     "alias 'significanceCalculator'='/mnt/data/liguowei/GenomeAgent/SUPPA-2.4/significanceCalculator.py'",
-            #     "alias 'fileMerger'='/mnt/data/liguowei/GenomeAgent/SUPPA-2.4/fileMerger.py'",
-            #     "alias 'psiCalculator'='/mnt/data/liguowei/GenomeAgent/SUPPA-2.4/psiCalculator.py'",
-            #     "alias 'suppa'='/mnt/data/liguowei/GenomeAgent/SUPPA-2.4/suppa.py'",
-            #     "alias 'CIRI_DE'='conda activate /root/data/liguowei/GenomeAgent/CIRIquant_env && CIRI_DE'",
-            #     "alias 'CIRI_DE_replicate'='conda activate /root/data/liguowei/GenomeAgent/CIRIquant_env && CIRI_DE_replicate'",
-            #     "alias 'CIRIquant'='conda activate /root/data/liguowei/GenomeAgent/CIRIquant_env && CIRIquant'",
-            #     "alias 'prep_CIRIquant'='conda activate /root/data/liguowei/GenomeAgent/CIRIquant_env && prep_CIRIquant'",
-            #     "alias 'snpEff'='/usr/bin/java -jar /root/data/liguowei/GenomeAgent/snpEff/snpEff.jar'",
-            #     "alias 'SnpSift'='/usr/bin/java -jar /root/data/liguowei/GenomeAgent/snpEff/SnpSift.jar'",
-            #     "alias 'snpeff'='/usr/bin/java -jar /root/data/liguowei/GenomeAgent/snpEff/snpEff.jar'",
-            #     "alias 'snpsift'='/usr/bin/java -jar /root/data/liguowei/GenomeAgent/snpEff/SnpSift.jar'",
-            #     "alias quast='/root/data/liguowei/GenomeAgent/quast/quast.py'",
-            #     "alias 'quast.py'='/root/data/liguowei/GenomeAgent/quast/quast.py'",
-            #     "alias FusionInspector='conda activate fusioninspector && FusionInspector'",
-            #     "alias busco='busco --offline'",
-            #     "alias HiC-Pro='conda activate /root/data/liguowei/GenomeAgent/HiC-Pro-master/HiC-Pro && /mnt/data/liguowei/GenomeAgent/bin/HiC-Pro_3.1.0/bin/HiC-Pro'",
-            #     "alias taco='/mnt/data/liguowei/miniconda3/envs/py27env/bin/taco_run'",
-            #     "alias taco_run='/mnt/data/liguowei/miniconda3/envs/py27env/bin/taco_run'",
-            #     "alias Piranha='conda activate py27env && /mnt/data/liguowei/miniconda3/envs/py27env/bin/Piranha'",
-            #     "alias piranha='conda activate py27env && /mnt/data/liguowei/miniconda3/envs/py27env/bin/Piranha'",
-            #     "alias flye-minimap2='flye-minimap2 -t 32'",
-            #     "alias flye='flye -t 32'",
-            #     "alias Ribotaper=/root/data/liguowei/GenomeAgent/ribotaper/bin/Ribotaper.sh",
-            #     "alias ribotaper='/root/data/liguowei/GenomeAgent/ribotaper/bin/Ribotaper.sh'",
-            #     "alias plink='/mnt/data/liguowei/miniconda3/envs/GWAS/bin/plink'",
-            #     "alias Piranha=/mnt/data/liguowei/miniconda3/bin/Piranha",
-            #     "alias piranha=/mnt/data/liguowei/miniconda3/bin/Piranha",
-            #     "### prefix end"
-            #     ]:
-            #     w.write(code + "\n")
             w.write(modify_content)
-            # w.write("\n".join([
-            #     "unset http_proxy",
-            #     "unset https_proxy",]))
-            # w.write("\n")
 
     def write_execute(self, job_shell=None):
         # 本地job_shell增加前置信息
@@ -745,13 +569,6 @@ class AgentCodeExecutor:
             log_info.extend(filter_content(stdout, "stdout"))
             log_info.extend(filter_content(stderr, "stderr"))
             _, _, _, executor_info = log_processor(log_info, self.max_stdout_line, self.max_stderr_line, self.max_log_len, path_prefix_to_remove=None, timestamp_length=None)
-
-        elif self.running_env == 'eiflow':
-            # 构建任务参数
-            job_shell_path = self.job_shell + ".exe"
-            create_job = eiflow_set_job(job_shell_path, eiflow_job_name, self.eiflow)
-            job_id = eiflow_run_job(create_job)
-            executor_info, execute_statu = eiflow_watch_job(eiflow_job_name, job_id, self.eiflow, self.max_stdout_line, self.max_stderr_line, self.max_log_len)
         else:
             raise ValueError(f"Unknown running environment: {self.running_env}")
 
@@ -772,90 +589,6 @@ def easyrun(job_shell_path):
 
 def contains_any(string, substrings):
     return any(substring in string for substring in substrings)
-
-def check_and_create_conda_env(conda_path=None, env_name='bioenv', python_version='3.9', r_version='4.1.0', openjdk_version=None):
-    if env_name == 'bioenv':
-        python_version = '3.9'
-        r_version = '4.1.0'
-    elif env_name == 'Renv':
-        python_version = '3.12'
-        r_version = '4.3.3'
-        openjdk_version = '17'
-
-    # 获取现有的conda环境列表
-    env_list = []
-    try:
-        if not conda_path:
-            conda = subprocess.run(['/usr/bin/which', 'conda'], capture_output=True, text=True, check=True)
-            conda_path = conda.stdout.strip()
-        result = subprocess.run([conda_path, 'env', 'list'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        env_list = result.stdout + result.stderr
-    except Exception as e:
-        print_colored(e, 'RED')
-
-    # 检查bioenv是否在环境列表中
-    if env_name not in env_list:
-        try:
-            print_colored(f"conda env {env_name} do not exist, automatically create now...")
-            # 创建新的conda环境
-            if openjdk_version:
-                res = subprocess.run([conda_path, 'create', '--name', env_name, f'conda-forge::python={python_version}', f'conda-forge::r-base={r_version}', f'conda-forge::openjdk={openjdk_version}', '-y'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            else:
-                res = subprocess.run([conda_path, 'create', '--name', env_name, f'conda-forge::python={python_version}', f'conda-forge::r-base={r_version}', '-y'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return res.returncode == 0
-        except EnvironmentError:
-            return False
-    else:
-        return True
-
-def check_and_create_conda(conda_path=None, conda_home='/home/health-user/miniconda/', url="https://repo.anaconda.com/miniconda/Miniconda3-py310_24.5.0-0-Linux-x86_64.sh", filename="Miniconda3-py310_24.5.0-0-Linux-x86_64.sh"):
-    install = False
-    try:
-        if not conda_path:
-            conda = subprocess.run(['/usr/bin/which', 'conda'], capture_output=True, text=True, check=True)
-            conda_path = conda.stdout.strip()
-        install = subprocess.run([conda_path, '--version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if install.returncode == 0:
-            install = True
-    except Exception as e:
-        print_colored(e, 'RED')
-    if install:
-        return install
-    try:
-        print_colored(f"download and install Miniconda: {url}")
-        response = requests.get(url, stream=False)
-        delete_file(filename)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        modes = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
-        fd = os.open(filename, flags, modes)
-        with os.fdopen(fd, "wb") as file:
-            file.write(response.content)
-        cmd = [
-            ["/usr/bin/bash", filename, "-b", "-u", "-p", conda_home],
-            ["source", f"{conda_home}bin/activate"],
-            ["export", f"PATH={conda_home}bin:$PATH"],
-            ["eval", f"$({conda_home}bin/conda shell.bash hook)"],
-            ["export", f"PATH={conda_home}bin:$PATH"],
-            [f"{conda_home}bin/conda", "init"],
-            ["/usr/bin/echo", f"export PATH={conda_home}bin:$PATH", ">>", "~/.bashrc"],
-            ["/usr/bin/echo", f"'eval $({conda_home}bin/conda shell.bash hook)'", ">>", "~/.bashrc"]
-        ]
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        modes = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
-        fd = os.open(filename + ".exe", flags, modes)
-        with os.fdopen(fd, "w") as file:
-            for i in cmd:
-                file.write(" ".join(i) + "\n")
-        res = subprocess.run(["/bin/bash", filename + ".exe"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if res.returncode == 0:
-            install = True
-            os.environ['PATH'] = f'{conda_home}bin:' + os.environ.get('PATH', '')
-            conda_path = f'{conda_home}bin/conda'
-    except subprocess.CalledProcessError:
-        print_colored("Failed to install conda", "RED")
-    delete_file(filename)
-    delete_file(filename + ".exe")
-    return install
 
 def delete_file(self, f):
     if os.path.exists(f):
@@ -946,8 +679,6 @@ def filter_stdout(content):
         return True, content
     if content.strip().endswith('Cached'):
         return True, content
-    # if sum([x.startswith("col") or x.startswith("row") for x in content.split(", ")]) >= 3:
-    #     return True, content
     return False, content
 
 def filter_stderr(content):
@@ -967,205 +698,8 @@ def filter_stderr(content):
         return True, content
     if content.strip().endswith('Cached'):
         return True, content
-    # if sum([x.startswith("col") or x.startswith("row") for x in content.split(", ")]) >= 3:
-    #     return True, content
     return False, content
 
-
-
-
-
-def eiflow_set_job(job_shell_path, eiflow_job_name, eiflow):
-    index = eiflow.obs_working_path.find(eiflow.project_name) + len(eiflow.project_name)
-    job_workflow_input_sh = eiflow.project_name + ":/" + os.path.join(eiflow.obs_working_path[index:], job_shell_path).lstrip("/")
-    job_workflow_input = f"{eiflow.workflow_task_name}.input-sh={job_workflow_input_sh};;"
-    job_workflow_input += f"{eiflow.workflow_task_name}.input-dir={eiflow.obs_loading_path};;"
-    job_workflow_input += f"{eiflow.workflow_task_name}.output-dir={eiflow.job_output_path}"
-
-    create_job = [eiflow.health_tool, "create", "job", "-w", eiflow.workflow_id, "-n", eiflow_job_name, "-i", job_workflow_input]
-
-    if 'nodeLabels' in eiflow.job_params.keys():
-        create_job.append(f"-l {eiflow.job_params['nodeLabels']}")
-    if 'priority' in eiflow.job_params.keys():
-        create_job.append(f"-p {eiflow.job_params['priority']}")
-    if 'io-acc-id' in eiflow.job_params.keys():
-        create_job.append(f"-c {eiflow.job_params['io-acc-id']}")
-    if 'io-acc-tasks' in eiflow.job_params.keys():
-        create_job.append(f"-s {eiflow.job_params['io-acc-tasks']}")
-
-    print_colored(eiflow.health_tool + " create " + " job " + " -w " + eiflow.workflow_id +
-                  " -n " + eiflow_job_name + " -i \"" + job_workflow_input + "\"")
-
-
-def eiflow_run_job(create_job: List) -> Tuple[bool, str]:
-    result = None
-    # 投递任务
-    try:
-        result = subprocess.run(create_job, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except Exception as e:
-        print_colored(e, 'RED')
-    return_code = result.returncode
-    output = result.stdout
-    errors = result.stderr
-
-    # 检查任务投递情况
-    job_id = None
-    if return_code == 0:
-        job_id = re.search(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
-                           output).group(0)
-        print_colored(f"[The job have been submitted with id: {job_id}!]", 'GREEN')
-        return True, job_id
-    else:
-        # raise ValueError(f"The create job command execution failed; the return code: {return_code}; errors: {errors}")
-        return False, (f"The create job command execution failed; \n"
-                       f"the return code: {return_code}; \noutput: {output}; \nerrors: {errors}")
-
-
-def eiflow_watch_job(eiflow_job_name, job_id, eiflow, max_stdout_line, max_stderr_line, max_log_len):
-    # 远程任务，每隔1分钟，查询job状态
-    status = eiflow_get_log_once(job_id, eiflow)
-    print_colored("Check job status! " + " ".join([eiflow.health_tool, "get", "job", job_id, "--detail"]))
-    total_time = 0
-    while status in ["RUNNING", "PENDING"]:
-        time.sleep(60)
-        total_time += 60
-        status = eiflow_get_log_once(job_id, eiflow)
-        if total_time > 604800:
-            print_colored(f"The job {eiflow_job_name} {job_id} has been running for over 7 days, please check it.", 'RED')
-            raise ValueError(f"The job {eiflow_job_name} {job_id} has been running for over 7 days, please check it.")
-
-    # 根据作业状态处理行为
-    # RUNNING  CANCELLED FAILED SUCCEEDED
-    # Succeeded、Running、Pending、Failed、Cancelling、Cancelled、Unknown
-    # 当作业状态为成功或者失败时，获取日志
-    if status == "SUCCEEDED" or status == "FAILED":
-        time.sleep(60 * 5)
-        log_info = None
-        while not log_info:
-            time.sleep(10)
-            try:
-                log_info = eiflow_get_log_once(job_id, eiflow, return_log=True)
-            except Exception as e:
-                time.sleep(3)
-        # print(f"log_info:{}")
-        _, _, _, executor_info = log_processor(log_info, max_stdout_line, max_stderr_line, max_log_len, path_prefix_to_remove=eiflow.obs_working_path, timestamp_length=20)
-        if status == "SUCCEEDED":
-            return executor_info, True
-        if status == "FAILED":
-            return executor_info, False
-    # 通常来说，作业最终状态只为成功或者失败
-    else:
-        print_colored(f"The job status: {status}.", 'RED')
-        print_colored(f"The job {eiflow_job_name} {job_id} status is abnormal, please check it.", 'RED')
-        raise ValueError(f"The job status: {status}. The job {eiflow_job_name} {job_id} status is abnormal, please check it.")
-
-
-def eiflow_get_job_once(job_id, eiflow):
-    # 获取日志转储链接
-    try:
-        cmd = [eiflow.health_tool, "get", "job", job_id, "--detail"]
-        result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        return_code = result.returncode
-        output = json.loads(result.stdout)
-        errors = result.stderr
-        return result, return_code, output, errors
-    except subprocess.CalledProcessError as e:
-        cmd = ["health", "get", "job", job_id, "--detail"]
-        print_colored("Failed to check job status! " + " ".join(cmd), 'RED')
-        print_colored(e.stderr, 'RED')
-    return None, None, None
-
-
-def eiflow_get_log_once(job_id=None, eiflow=None, return_log=False):
-    # 获取日志转储链接
-    result, return_code, output, errors = eiflow_get_job_once(job_id, eiflow)
-
-    if return_code == 0 and not return_log:
-        return output["jobs"][0]["status"]
-
-    elif return_code == 0 and return_log:
-        if "log_storage_link" in output["jobs"][0]["task_runtime_info"][0]["sub_tasks"][0]:
-            log_storage_link = output["jobs"][0]["task_runtime_info"][0]["sub_tasks"][0]["log_storage_link"]
-            while not log_storage_link.startswith("https://eihealth-storage"):
-                time.sleep(60)
-                # 再次获取日志转储链接
-                result, return_code, output, errors = eiflow_get_job_once(job_id, eiflow)
-                log_storage_link = output["jobs"][0]["task_runtime_info"][0]["sub_tasks"][0]["log_storage_link"]
-            url = log_storage_link.replace("\u0026", "&")
-            response = requests.get(url)
-            if response.status_code != 200:
-                raise Exception(f"Requests failed to get log information: status_code {response.status_code}")
-            log_content = response.text.splitlines()
-            return log_content
-        else:
-            print_colored("log_storage_link does not exist int job info", 'RED')
-            raise ValueError
-
-    else:
-        print_colored(f"The job status command execution failed; the return code: {return_code}; errors: {errors}", 'RED')
-        raise ValueError
-
-
-Context = {
-    "running_env": "local",  # 'local' or 'eiflow'
-    "terminal_interactive": False,
-    "eiflow": None,
-
-    # llm setting
-    "model": "",
-    "base_url": None,
-    "proxy": None,
-    "proxy_verify": False,
-
-    # data setting
-    "task_config": {},
-    "working_dir": "",
-    "output_log_dir": "",
-    "black_list": [
-        "bioconductor-deseq2", "r-deseq2", "deseq2", "r-deseq2", "deseq2", "r", "r-base"
-    ],
-
-    # shell setting
-    "conda_home": "/Users/liguowei/ubuntu/miniconda3/",
-    "conda_bioenv": "bioenv",
-    "conda_renv": "Renv",
-    "do_execute": False,
-    "debug": True,
-
-    "current_agent": None,
-    "current_input": None,
-
-    # backend
-    "last_step": None,
-    "last_status": False,
-    "task_history": [],
-    "global_round": [0],
-    "round_times": [0],
-    "cur_round": 0,
-
-    "global_message_index": [],
-    "all_execute_code": [],
-    "all_execute_log": [],
-    "all_messages": [],
-    "frontend_messages": [],
-    "chat_history": [],
-
-    # 变量配置：落地时的考虑，限制了任务的步骤重试次数等
-    "max_round": 300,
-    "max_times_per_round": 30,
-
-    # 占位
-    'rag_env': None,
-    'runtime_tools': {},
-    'runtime_agents': {},
-
-    "activate_agent_state": {},
-
-    "activate_tool_state": {
-        "web_search": "deactivated",
-        "visit_webpage": "deactivated",
-        }
-}
 
 def code_rule_sudo(bash_code: str, debug: bool = False) -> [bool, str]:
     if "sudo " in bash_code:
@@ -1281,35 +815,29 @@ class BashCodeRunToolWrapper:
     def __init__(self):
         self.debug = False
         self.black_list: List[str] = []
-        self.max_times_per_round: int = 0
-        self.eiflow = None
+        self.round_times = 0
+        self.max_times_per_round: int = 30
+        self.global_round = 0
+        self.working_dir = ""
+        self.last_status = False
+        self.running_env = "local"
+        self.conda_home = '/Users/liguowei/ubuntu/miniconda3'
+        self.conda_bioenv = 'bioenv'
+        self.conda_renv = 'bioenv'
+        self.do_execute = True
 
-    def run(self, bash_code: str, context_variables) -> str:
+    def run(self, bash_code: str) -> str:
         """
         This tool receive bash code in string format, then automatically invoke a Linux environment to execute the
         given code, and return a description of the execution status.
         """
-        # init replace
-        self.debug = context_variables['debug']
-        self.black_list = context_variables['black_list']
-        self.max_times_per_round = context_variables['max_times_per_round']
-        self.eiflow = context_variables['eiflow']
-        if self.eiflow is not None:
-            self.shell_running_dir = self.eiflow.obs_working_path
-
         # record times for this round, failed when reaching limitation
-        global_round = context_variables['global_round'][-1] + 1
-        if len(context_variables['round_times']) <= global_round:
-            context_variables['round_times'].append(0)
-            assert len(context_variables['round_times']) == (global_round+1)
+        global_round = self.global_round + 1
 
-        # TODO 这里默认把脚本写到了f"{self.output_log_dir}/{self.global_round}.sh"这个位置
         # write original code script
-        job_shell = os.path.join(context_variables['output_log_dir'], f"step{global_round}.sh" )
-        if self.eiflow is not None:
-            cmd_into_shell_dir = ""
-        else:
-            cmd_into_shell_dir = f"cd {context_variables['working_dir']}\n"
+        job_shell = os.path.join(self.working_dir, f"step{global_round}.sh" )
+        cmd_into_shell_dir = f"cd {self.working_dir}\n"
+
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         modes = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
         fd = os.open(job_shell, flags, modes)
@@ -1320,30 +848,20 @@ class BashCodeRunToolWrapper:
         for func_name in Code_Rule_Functions.keys():
             statu, log = Code_Rule_Functions.get(func_name)(bash_code)
             if not statu:
-                context_variables['last_status'] = False
+                self.last_status = False
                 return log
 
-        # record original code
-        context_variables['all_execute_code'].append(bash_code)
         # print original code
         bash_code = re.sub(re.compile(r"```.*?\n", re.DOTALL), '', bash_code)
         bash_code = re.sub(re.compile(r"```", re.DOTALL), '', bash_code)
         print_colored(f"### code in {job_shell}\n```bash\n{bash_code}\n```", 'GREEN', self.debug)
 
         # config, modify, and write local code file
-        if self.eiflow:
-            runner = AgentCodeExecutor(running_env='eiflow',
-                                       EIFlow=self.eiflow,
-                                       conda_home=self.eiflow.conda_home,
-                                       conda_bioenv=self.eiflow.conda_bioenv,
-                                       conda_renv=self.eiflow.conda_renv,
-                                       black_list=self.black_list)
-        else:
-            runner = AgentCodeExecutor(running_env=context_variables['running_env'],
-                                       conda_home=context_variables['conda_home'],
-                                       conda_bioenv=context_variables['conda_bioenv'],
-                                       conda_renv=context_variables['conda_renv'],
-                                       black_list=self.black_list)
+        runner = AgentCodeExecutor(running_env=self.running_env,
+                                   conda_home=self.conda_home,
+                                   conda_bioenv=self.conda_bioenv,
+                                   conda_renv=self.conda_renv,
+                                   black_list=self.black_list)
         runner.write_execute(job_shell=job_shell)
         # see modify codes
         with open(f"{job_shell}.exe", 'r') as f:
@@ -1355,21 +873,13 @@ class BashCodeRunToolWrapper:
 
         # execute code file
         execute_statu = False
-        if context_variables['do_execute']:
-            if self.eiflow:
-                eiflow_job_name = self.eiflow.job_name + f"-step{global_round}"
-                execute_log, execute_statu = runner.job_status_check(eiflow_job_name=eiflow_job_name)
-            else:
-                execute_log, execute_statu = runner.job_status_check()
-                # print_colored(f"execute_log, execute_statu: {execute_statu}", "ORANGE")
+        if self.do_execute:
+            execute_log, execute_statu = runner.job_status_check()
         else:
             execute_log, execute_statu = f'Code Execute Statu: Success', True
 
         if 'Rscript' in bash_code:
             execute_log = execute_log.replace("[stderr] ", "").replace("[stdout] ", "")
-
-        # record code result
-        context_variables['all_execute_log'].append("\n```bash\n" + bash_code + "\n```\n" + execute_log.replace("[stdout] ", "").replace("[stderr] ", ""))
 
         # 失败
         if not execute_statu and not pass_WhiteList(execute_log):
@@ -1381,27 +891,16 @@ class BashCodeRunToolWrapper:
             True	        True	        ❌
             """
             # 失败了会计数
-            context_variables['last_status'] = False
-            context_variables['round_times'][global_round] += 1
+            self.last_status = False
+            self.round_times += 1
             execute_log = re.sub(re.compile(r"```.*?\n", re.DOTALL), '', execute_log)
             execute_log = re.sub(re.compile(r"```", re.DOTALL), '', execute_log)
             print_colored(f'### Code Execute Statu: Failed {execute_statu}, log: \n```\n{execute_log}\n```\n', 'ORANGE', self.debug)
             return f'Code Execute Statu: Failed! The failed log: {execute_log}'
 
         # 成功 成功了不计数，因为工具可能会被并行跑
-        context_variables['last_status'] = True
-        context_variables['round_times'][global_round] += 0
-        # 成功了记录当前步骤进队列
-        context_variables['global_round'].append(global_round)
-        # 初始化下一步骤的次数
-        context_variables['round_times'].append(0)
-        # 记录代码，和相关进度
-        context_variables['task_history'].append(bash_code)
-        context_variables['global_message_index'].append({
-            'all_messages': len(context_variables['all_messages']),
-            'frontend_messages': len(context_variables['frontend_messages']),
-            'all_execute_code': len(context_variables['all_execute_code']),
-            'all_execute_log': len(context_variables['all_execute_log'])})
+        self.last_status = True
+        self.round_times += 0
         log_statu, blocked_log = block_files_in_log(bash_code, execute_log)
         if log_statu:
             print_colored(f'### Code Execute Statu: Success {execute_statu}! Log: \n```\n{blocked_log}\n```\n', 'ORANGE', self.debug)
@@ -1409,42 +908,3 @@ class BashCodeRunToolWrapper:
         else:
             print_colored(f'### Code Execute Statu: Success {execute_statu}!', 'ORANGE', self.debug)
             return f'Code Execute Statu: Success!'
-
-    def bash_code_llama_processor(self, bash_code, llm):
-        system_prompt = ("You are a code debugger.\nYou must follow the rules: (1) make you response as simple as "
-                         "possible; (2) try to keep the original bash code, only fix the error in codes; (3) do not "
-                         "add other unnecessary codes.")
-        prompt = "Check if any error in the bash codes and return your revised codes in block with ```bash  ``` :\n" + bash_code
-        content = None
-        while True:
-            try:
-                print(f"bash_code_run_tool llama_processor:")
-                content = llm.call(prompt, system_prompt)
-                if "```bash" in content.lower():
-                    match = re.search(r"```bash(.*?)```", content, re.DOTALL)
-                    content = match.group(1)
-                else:
-                    content = None
-                print(f"bash_code_run_tool llama_processor:\n{content}")
-            except:
-                content = None
-            if content:
-                bash_code = content
-                break
-        return bash_code
-
-# import getpass
-# import os
-#
-# os.environ["BING_SUBSCRIPTION_KEY"] = "b073cd58ed56447fb0fc3e92a35e5e6e"
-# os.environ["BING_SEARCH_URL"] = "https://api.bing.microsoft.com/v7.0/search"
-# from langchain_community.utilities import BingSearchAPIWrapper
-#
-# def web_search_tool(query: str) -> str:
-#     """
-#     This is a web search tool and enables safe, ad-free, location-aware search results, surfacing relevant information from billions of web documents.
-#     """
-#     search = BingSearchAPIWrapper(k=4)
-#     result = search.run(query)
-#     return result
-#
