@@ -11,6 +11,7 @@ from virtuallab.graph.query import QueryService
 from virtuallab.obs.events import EventBus
 from virtuallab.router import ActionRouter
 from virtuallab.exec.runner import StepRunner
+from virtuallab.knowledge import OpenAILLMSummarizerAdapter, SummaryService
 
 
 @dataclass
@@ -21,9 +22,21 @@ class VirtualLabApp:
     event_bus: EventBus = field(default_factory=EventBus)
     router: ActionRouter = field(default_factory=ActionRouter)
     step_runner: StepRunner = field(default_factory=StepRunner)
+    summary_service: SummaryService | None = None
 
     def __post_init__(self) -> None:
+        if self.summary_service is None:
+            try:
+                adapter = OpenAILLMSummarizerAdapter()
+            except (ModuleNotFoundError, ImportError):  # pragma: no cover - optional deps
+                class _EchoSummarizer:
+                    def summarize(self, *, text: str, style: str | None = None) -> str:
+                        return text if style is None else f"[{style}] {text}"
+
+                adapter = _EchoSummarizer()
+            self.summary_service = SummaryService(adapter=adapter)
         self._register_default_actions()
+        self._register_default_step_adapters()
 
     def handle(self, payload: dict) -> dict:
         """Dispatch an API payload and return a canonical response."""
@@ -49,9 +62,9 @@ class VirtualLabApp:
         self.router.register("add_data", self._handle_add_data)
         self.router.register("link", self._handle_link)
         self.router.register("query", self._handle_query)
+        self.router.register("run_step", self._handle_run_step)
+        self.router.register("summarize", self._handle_summarize)
         for action in (
-            "run_step",
-            "summarize",
             "record_note",
             "auto_link",
             "export_graph",
@@ -59,6 +72,19 @@ class VirtualLabApp:
             "rollback",
         ):
             self.router.register(action, self._not_implemented_action(action))
+
+    def _register_default_step_adapters(self) -> None:
+        if "engineer" in self.step_runner.adapters:
+            return
+        try:
+            from virtuallab.exec.adapters.engineer import EngineerAdapter
+
+            self.step_runner.register_adapter("engineer", EngineerAdapter())
+        except ModuleNotFoundError:  # pragma: no cover - optional dependency
+            # The Engineer adapter depends on the external ``smolagents`` package.
+            # When it is unavailable we silently skip registration so that callers
+            # can supply their own lightweight adapters during testing.
+            return
 
     def _not_implemented_action(self, action: str):
         def _handler(_: dict) -> dict:
@@ -93,6 +119,8 @@ class VirtualLabApp:
         plan_id = params.get("plan_id")
         if not plan_id:
             raise KeyError("'plan_id' is required")
+        if not self.graph_store.get_node(plan_id):
+            raise KeyError(f"Plan '{plan_id}' does not exist")
         subtask_id = params.get("id") or new_id("subtask")
         now = utc_now()
         node = NodeSpec(
@@ -123,6 +151,8 @@ class VirtualLabApp:
         subtask_id = params.get("subtask_id")
         if not subtask_id:
             raise KeyError("'subtask_id' is required")
+        if not self.graph_store.get_node(subtask_id):
+            raise KeyError(f"Subtask '{subtask_id}' does not exist")
         step_id = params.get("id") or new_id("step")
         now = utc_now()
         node = NodeSpec(
@@ -175,6 +205,10 @@ class VirtualLabApp:
         target = params.get("target")
         if not source or not target:
             raise KeyError("'source' and 'target' are required")
+        if not self.graph_store.get_node(source):
+            raise KeyError(f"Source node '{source}' does not exist")
+        if not self.graph_store.get_node(target):
+            raise KeyError(f"Target node '{target}' does not exist")
         edge_type = EdgeType(params.get("type", EdgeType.ASSOCIATED_WITH.value))
         edge = EdgeSpec(source=source, target=target, type=edge_type, attributes=params.get("attributes", {}))
         self.graph_store.add_edge(edge)
@@ -205,6 +239,88 @@ class VirtualLabApp:
         else:
             raise ValueError(f"Unsupported query kind: {kind}")
         return {"result": {"items": results}, "graph_delta": None}
+
+    def _handle_run_step(self, params: dict) -> dict:
+        step_id = params.get("step_id")
+        if not step_id:
+            raise KeyError("'step_id' is required")
+        step = self.graph_store.get_node(step_id)
+        if step is None or step.type is not NodeType.STEP:
+            raise KeyError(f"Step '{step_id}' does not exist")
+
+        tool = params.get("tool") or step.attributes.get("tool")
+        if not tool:
+            raise KeyError("A 'tool' is required to execute the step")
+
+        payload = params.get("payload") or {}
+        execution_details = self.step_runner.run(tool=tool, step_id=step_id, payload=payload)
+        execution_record = dict(execution_details)
+        execution_record.setdefault("step_id", step_id)
+        execution_record.setdefault("tool", tool)
+
+        run_id = execution_record.get("run_id") or params.get("run_id")
+        if not run_id:
+            run_id = new_id("run")
+            execution_record["run_id"] = run_id
+
+        status = execution_record.get("status") or "completed"
+        timestamp = utc_now()
+
+        updates: dict[str, object] = {
+            "status": status,
+            "run_id": run_id,
+            "updated_at": timestamp,
+            "executed_at": timestamp,
+            "last_run_tool": tool,
+        }
+
+        if "output" in execution_record:
+            updates["last_run_output"] = execution_record["output"]
+        if "error" in execution_record:
+            updates["last_run_error"] = execution_record["error"]
+        if "metrics" in execution_record:
+            updates["last_run_metrics"] = execution_record["metrics"]
+
+        updated_node = NodeSpec(id=step.id, type=step.type, attributes=updates)
+        delta = GraphDelta(updated_nodes=[updated_node])
+        self.graph_store.apply_delta(delta)
+
+        result_payload = {
+            "step_id": step_id,
+            "run_id": run_id,
+            "status": status,
+            "output": execution_record.get("output"),
+            "details": execution_record,
+        }
+        return {"result": result_payload, "graph_delta": delta}
+
+    def _handle_summarize(self, params: dict) -> dict:
+        if self.summary_service is None:
+            raise RuntimeError("Summary service is not configured")
+        text = params.get("text")
+        if not text:
+            raise KeyError("'text' is required")
+        style = params.get("style")
+        summary_result = self.summary_service.summarize(text=text, style=style)
+
+        target_id = params.get("target_id")
+        delta: Optional[GraphDelta]
+        if target_id:
+            node = self.graph_store.get_node(target_id)
+            if node is None:
+                raise KeyError(f"Node '{target_id}' does not exist")
+            updates = {
+                "summary": summary_result["summary"],
+                "summary_style": summary_result["style"],
+                "updated_at": utc_now(),
+            }
+            updated_node = NodeSpec(id=node.id, type=node.type, attributes=updates)
+            delta = GraphDelta(updated_nodes=[updated_node])
+            self.graph_store.apply_delta(delta)
+        else:
+            delta = None
+
+        return {"result": summary_result, "graph_delta": delta}
 
     def _serialize_graph_delta(self, delta: Optional[GraphDelta]) -> dict:
         if delta is None:

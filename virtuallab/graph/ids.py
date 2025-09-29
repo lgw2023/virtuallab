@@ -14,4 +14,4 @@ def new_id(prefix: str) -> str:
 def utc_now() -> str:
     """Return the current UTC time formatted as an ISO 8601 string."""
 
-    return _dt.datetime.utcnow().replace(tzinfo=_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
