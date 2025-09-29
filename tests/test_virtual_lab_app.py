@@ -1,12 +1,33 @@
 import pytest
 
 from virtuallab.api import VirtualLabApp
+from virtuallab.exec.runner import StepRunner
 from virtuallab.graph.model import EdgeType, NodeType
+from virtuallab.knowledge import SummaryService
+
+
+class _StubStepAdapter:
+    def run(self, *, step_id: str, payload: dict) -> dict:
+        return {
+            "step_id": step_id,
+            "output": f"ran:{payload.get('text', '')}",
+            "status": "completed",
+            "run_id": "run_stub",
+        }
+
+
+class _StubSummarizer:
+    def summarize(self, *, text: str, style: str | None = None) -> str:
+        prefix = f"[{style}] " if style else ""
+        return prefix + text[:50]
 
 
 @pytest.fixture()
 def app():
-    return VirtualLabApp()
+    runner = StepRunner()
+    runner.register_adapter("engineer", _StubStepAdapter())
+    summary_service = SummaryService(adapter=_StubSummarizer())
+    return VirtualLabApp(step_runner=runner, summary_service=summary_service)
 
 
 def _create_plan(app: VirtualLabApp, **overrides) -> str:
@@ -27,7 +48,7 @@ def _add_step(app: VirtualLabApp, subtask_id: str, **overrides) -> str:
     params = {
         "subtask_id": subtask_id,
         "name": "Step",
-        "tool": "noop",
+        "tool": "engineer",
         "inputs": {"param": 1},
     }
     params.update(overrides)
@@ -195,4 +216,47 @@ def test_timeline_query_orders_by_timestamp(app: VirtualLabApp) -> None:
 def test_handle_requires_action_key(app: VirtualLabApp) -> None:
     with pytest.raises(KeyError, match="action"):
         app.handle({})
+
+
+def test_run_step_updates_step_node(app: VirtualLabApp) -> None:
+    plan_id = _create_plan(app)
+    subtask_id = _add_subtask(app, plan_id)
+    step_id = _add_step(app, subtask_id)
+
+    response = app.handle(
+        {
+            "action": "run_step",
+            "params": {
+                "step_id": step_id,
+                "payload": {"text": "do something"},
+            },
+        }
+    )
+
+    result = response["result"]
+    assert result["status"] == "completed"
+    assert result["run_id"] == "run_stub"
+    assert result["output"] == "ran:do something"
+
+    node = app.graph_store.get_node(step_id)
+    assert node is not None
+    assert node.attributes["status"] == "completed"
+    assert node.attributes["last_run_output"] == "ran:do something"
+    assert node.attributes["run_id"] == "run_stub"
+
+    updated_nodes = response["graph_delta"]["updated_nodes"]
+    assert updated_nodes and updated_nodes[0]["id"] == step_id
+
+
+def test_summarize_returns_summary(app: VirtualLabApp) -> None:
+    response = app.handle(
+        {
+            "action": "summarize",
+            "params": {"text": "This is a long text", "style": "bullet"},
+        }
+    )
+
+    result = response["result"]
+    assert result["summary"].startswith("[bullet]")
+    assert response["graph_delta"] == {"added_nodes": [], "added_edges": [], "updated_nodes": []}
 
