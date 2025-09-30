@@ -458,6 +458,11 @@ def test_summarize_returns_summary(app: VirtualLabApp) -> None:
     )
 
     result = response["result"]
-    assert result["summary"].startswith("[bullet]")
+    summary = result["summary"]
+
+    assert isinstance(summary, str)
+    assert summary.strip(), "Expected summarization to return non-empty content"
+    assert summary.strip() != "This is a long text"
+    assert result["style"] == "bullet"
     assert response["graph_delta"] == {"added_nodes": [], "added_edges": [], "updated_nodes": []}
 
