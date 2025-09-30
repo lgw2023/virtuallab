@@ -3,29 +3,27 @@ from unittest import mock
 import pytest
 
 from virtuallab.api import VirtualLabApp
+from virtuallab.config import get_env
 from virtuallab.exec.adapters import engineer
 from virtuallab.graph.model import EdgeType, NodeType
 from virtuallab.graph.rules import AutoLinkCandidate, AutoLinkContext, AutoLinkProposal
 
 
 @pytest.fixture()
-def app(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        "virtuallab.api.OpenAILLMSummarizerAdapter",
-        mock.Mock(side_effect=ModuleNotFoundError("openai missing")),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "virtuallab.api.OpenAIAutoLinkAdapter",
-        mock.Mock(side_effect=RuntimeError("openai missing")),
-        raising=False,
-    )
-
+def app():
     app = VirtualLabApp()
     stub_client = mock.Mock()
     stub_client.run.side_effect = lambda prompt, tools=None: f"ran:{prompt}:{len(tools or [])}"
     app.step_runner.register_adapter("engineer", engineer.EngineerAdapter(client=stub_client))
     return app
+
+
+@pytest.fixture(scope="module")
+def ensure_openai_env() -> None:
+    if not get_env("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY is not configured")
+    if not get_env("OPENAI_API_MODEL"):
+        pytest.skip("OPENAI_API_MODEL is not configured")
 
 
 def _create_plan(app: VirtualLabApp, **overrides) -> str:
@@ -52,6 +50,26 @@ def _add_step(app: VirtualLabApp, subtask_id: str, **overrides) -> str:
     params.update(overrides)
     response = app.handle({"action": "add_step", "params": params})
     return response["result"]["step_id"]
+
+
+def test_summarize_action_invokes_llm(app: VirtualLabApp, ensure_openai_env: None) -> None:
+    response = app.handle(
+        {
+            "action": "summarize",
+            "params": {
+                "text": "Summarize the experiment results highlighting key findings.",
+                "style": "concise",
+            },
+        }
+    )
+
+    summary = response["result"]["summary"]
+    assert isinstance(summary, str)
+    assert summary.strip(), "Expected summarization to return non-empty content"
+    assert summary.strip() not in {
+        "Summarize the experiment results highlighting key findings.",
+        "[concise] Summarize the experiment results highlighting key findings.",
+    }
 
 
 def test_record_note_creates_note_node(app: VirtualLabApp) -> None:

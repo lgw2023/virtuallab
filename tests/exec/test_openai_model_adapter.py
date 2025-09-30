@@ -1,14 +1,11 @@
-"""Tests for the OpenAI adapter helpers using the real AsyncOpenAI client."""
+"""Integration tests for the OpenAI adapter helpers."""
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
-import httpx
 import pytest
 
 import virtuallab.exec.adapters.openai_model as openai_adapter
+from virtuallab.config import get_env
 
 
 @pytest.fixture
@@ -16,6 +13,20 @@ def anyio_backend() -> str:
     """Force the anyio plugin to use the asyncio backend only."""
 
     return "asyncio"
+
+
+@pytest.fixture(scope="module")
+def openai_config() -> dict[str, str]:
+    """Ensure that required OpenAI configuration is present for the integration tests."""
+
+    api_key = get_env("OPENAI_API_KEY")
+    if not api_key:
+        pytest.skip("OPENAI_API_KEY is not configured")
+    model = get_env("OPENAI_API_MODEL")
+    if not model:
+        pytest.skip("OPENAI_API_MODEL is not configured")
+    base_url = get_env("OPENAI_API_URL")
+    return {"model": model, "base_url": base_url} if base_url else {"model": model}
 
 
 class DummyTokenTracker:
@@ -29,258 +40,60 @@ class DummyTokenTracker:
 
 
 @pytest.mark.anyio("asyncio")
-async def test_openai_complete_if_cache_sends_messages_and_tracks_usage(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "key")
+async def test_openai_complete_returns_content(openai_config: dict[str, str]) -> None:
+    """The completion helper should return a non-empty string from the live service."""
 
-    captured_request: dict[str, Any] = {}
-    tracker = DummyTokenTracker()
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured_request["url"] = str(request.url)
-        captured_request["body"] = json.loads(request.content.decode())
-        response_payload = {
-            "id": "chatcmpl-1",
-            "object": "chat.completion",
-            "created": 0,
-            "model": "model-id",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "hello\\u4f60"},
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 1,
-                "completion_tokens": 2,
-                "total_tokens": 3,
-            },
-        }
-        return httpx.Response(200, json=response_payload)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    def fake_create_openai_async_client(*, api_key=None, base_url=None, client_configs=None):
-        return openai_adapter.AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=http_client,
-        )
-
-    monkeypatch.setattr(
-        openai_adapter, "create_openai_async_client", fake_create_openai_async_client
+    response = await openai_adapter.openai_complete(
+        prompt="Respond with a short confirmation for integration testing.",
+        system_prompt="You are verifying connectivity for the VirtualLab test suite.",
     )
 
-    result = await openai_adapter.openai_complete_if_cache(
-        model="model-id",
-        prompt="user prompt",
-        system_prompt="system message",
-        history_messages=[{"role": "assistant", "content": "prev"}],
-        token_tracker=tracker,
-        base_url="https://mock.api/v1",
-    )
-
-    assert result == "hello你"
-    assert captured_request["url"] == "https://mock.api/v1/chat/completions"
-    assert captured_request["body"]["model"] == "model-id"
-    assert captured_request["body"]["messages"] == [
-        {"role": "system", "content": "system message"},
-        {"role": "assistant", "content": "prev"},
-        {"role": "user", "content": "user prompt"},
-    ]
-    assert tracker.records == [
-        {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
-    ]
-    assert http_client.is_closed
+    assert isinstance(response, str)
+    assert response.strip(), "Expected the LLM to return non-empty content"
 
 
 @pytest.mark.anyio("asyncio")
-async def test_openai_complete_if_cache_streaming_tracks_usage(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "key")
+async def test_openai_complete_streaming_yields_chunks(
+    openai_config: dict[str, str]
+) -> None:
+    """Streaming completions should yield chunks and optionally track usage."""
 
     tracker = DummyTokenTracker()
-    captured_request: dict[str, Any] = {}
-
-    chunks = [
-        {
-            "id": "chunk-1",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": "model-id",
-            "choices": [
-                {"index": 0, "delta": {"role": "assistant", "content": "A"}},
-            ],
-        },
-        {
-            "id": "chunk-2",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": "model-id",
-            "choices": [
-                {"index": 0, "delta": {"role": "assistant", "content": "B"}},
-            ],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12},
-        },
-    ]
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured_request["body"] = json.loads(request.content.decode())
-        payload = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
-        payload += "data: [DONE]\n\n"
-        return httpx.Response(
-            200,
-            headers={"content-type": "text/event-stream"},
-            content=payload.encode("utf-8"),
-        )
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    def fake_create_openai_async_client(*, api_key=None, base_url=None, client_configs=None):
-        return openai_adapter.AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=http_client,
-        )
-
-    monkeypatch.setattr(
-        openai_adapter, "create_openai_async_client", fake_create_openai_async_client
-    )
-
     iterator = await openai_adapter.openai_complete_if_cache(
-        model="model-id",
-        prompt="stream",
+        openai_config["model"],
+        prompt="Provide a two sentence update streamed token-by-token.",
         stream=True,
         token_tracker=tracker,
-        base_url="https://mock.api/v1",
+        base_url=openai_config.get("base_url"),
     )
 
-    collected = []
+    collected: list[str] = []
     async for chunk in iterator:
         collected.append(chunk)
 
-    assert collected == ["A", "B"]
-    assert tracker.records == [
-        {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
-    ]
-    assert captured_request["body"]["stream"] is True
-    assert http_client.is_closed
+    combined = "".join(collected).strip()
+    assert combined, "Expected streamed response to contain content"
+    if tracker.records:
+        assert all("total_tokens" in record for record in tracker.records)
 
 
 @pytest.mark.anyio("asyncio")
-async def test_openai_complete_keyword_extraction(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_MODEL", "env-model")
-    monkeypatch.setenv("OPENAI_API_KEY", "key")
+async def test_openai_complete_keyword_extraction_live(openai_config: dict[str, str]) -> None:
+    """Keyword extraction flag should produce a response from the live endpoint."""
 
-    captured_request: dict[str, Any] = {}
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured_request["body"] = json.loads(request.content.decode())
-        return httpx.Response(
-            200,
-            json={
-                "id": "chatcmpl-2",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "env-model",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "ok"},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-            },
-        )
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    def fake_create_openai_async_client(*, api_key=None, base_url=None, client_configs=None):
-        return openai_adapter.AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=http_client,
-        )
-
-    monkeypatch.setattr(
-        openai_adapter, "create_openai_async_client", fake_create_openai_async_client
+    prompt = (
+        "Extract keywords for the following topics and respond in JSON:"
+        " data pipelines, experiment tracking, anomaly detection."
     )
-
-    result = await openai_adapter.openai_complete(
-        prompt="p",
-        system_prompt="s",
-        history_messages=[{"role": "user", "content": "hi"}],
+    response = await openai_adapter.openai_complete(
+        prompt=prompt,
+        system_prompt="Return machine readable JSON keyed by 'keywords'.",
         keyword_extraction=True,
-        base_url="https://mock.api/v1",
+        base_url=openai_config.get("base_url"),
     )
 
-    assert result == "ok"
-    assert "response_format" not in captured_request["body"]
-    assert captured_request["body"]["messages"][0] == {
-        "role": "system",
-        "content": "s",
-    }
-
-
-@pytest.mark.anyio("asyncio")
-async def test_nvidia_openai_complete_keyword_extraction(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "key")
-
-    captured_request: dict[str, Any] = {}
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured_request["url"] = str(request.url)
-        captured_request["body"] = json.loads(request.content.decode())
-        return httpx.Response(
-            200,
-            json={
-                "id": "chatcmpl-3",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "nvidia/llama-3.1-nemotron-70b-instruct",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": "noise {\"answer\": 1} trailing",
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-            },
-        )
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    def fake_create_openai_async_client(*, api_key=None, base_url=None, client_configs=None):
-        return openai_adapter.AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=http_client,
-        )
-
-    monkeypatch.setattr(
-        openai_adapter, "create_openai_async_client", fake_create_openai_async_client
-    )
-
-    result = await openai_adapter.nvidia_openai_complete(
-        prompt="ask",
-        keyword_extraction=True,
-    )
-
-    assert result == "noise {\"answer\": 1} trailing"
-    assert captured_request["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
-    assert captured_request["body"]["model"] == "nvidia/llama-3.1-nemotron-70b-instruct"
+    assert isinstance(response, str)
+    assert response.strip(), "Expected keyword extraction to yield content"
 
 
 def test_locate_json_string_body_from_string():

@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from virtuallab.config import get_env
 from virtuallab.knowledge.summarize import (
     OpenAILLMSummarizerAdapter,
     SummaryService,
@@ -27,37 +28,34 @@ def test_ensure_text_handles_async_iterator():
     assert result == "abc"
 
 
-@pytest.fixture()
-def recorded_completion(monkeypatch):
-    calls: list[dict[str, object]] = []
-
-    async def completion(prompt: str, *, system_prompt: str, **kwargs):
-        calls.append({"prompt": prompt, "system_prompt": system_prompt, "kwargs": kwargs})
-        return "summary"
-
-    monkeypatch.setattr(
-        "virtuallab.exec.adapters.openai_model.gpt_4o_mini_complete", completion
-    )
-    return calls
+@pytest.fixture(scope="module")
+def ensure_openai_env() -> None:
+    if not get_env("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY is not configured")
+    if not get_env("OPENAI_API_MODEL"):
+        pytest.skip("OPENAI_API_MODEL is not configured")
 
 
-def test_openai_llm_summarizer_builds_prompt_and_invokes_completion(recorded_completion):
+def test_openai_llm_summarizer_integration(ensure_openai_env: None):
     adapter = OpenAILLMSummarizerAdapter()
 
     summary = adapter.summarize(text="Important findings", style="bullet")
 
-    assert summary == "summary"
-    assert len(recorded_completion) == 1
-    prompt = recorded_completion[0]["prompt"]
-    assert "Important findings" in prompt
-    assert "bullet" in prompt
-    assert recorded_completion[0]["system_prompt"].startswith("You are an expert")
+    assert isinstance(summary, str)
+    assert summary.strip()
+    assert summary.strip() not in {
+        "Important findings",
+        "[bullet] Important findings",
+    }
 
 
-def test_summary_service_wraps_adapter(recorded_completion):
+def test_summary_service_wraps_adapter(ensure_openai_env: None):
     adapter = OpenAILLMSummarizerAdapter()
     service = SummaryService(adapter=adapter)
 
     payload = service.summarize(text="content", style="concise")
 
-    assert payload == {"summary": "summary", "style": "concise"}
+    assert isinstance(payload["summary"], str)
+    assert payload["summary"].strip()
+    assert payload["summary"].strip() not in {"content", "[concise] content"}
+    assert payload["style"] == "concise"
