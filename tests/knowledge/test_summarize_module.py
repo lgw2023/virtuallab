@@ -40,7 +40,7 @@ def test_openai_llm_summarizer_integration(ensure_openai_env: None):
     adapter = OpenAILLMSummarizerAdapter()
 
     summary = adapter.summarize(text="Important findings", style="bullet")
-
+    print(f"\n@ test_openai_llm_summarizer_integration: {summary}")
     assert isinstance(summary, str)
     assert summary.strip()
     assert summary.strip() not in {
@@ -54,7 +54,7 @@ def test_summary_service_wraps_adapter(ensure_openai_env: None):
     service = SummaryService(adapter=adapter)
 
     payload = service.summarize(text="content", style="concise")
-
+    print(f"\n@ test_summary_service_wraps_adapter: {payload}")
     assert isinstance(payload["summary"], str)
     assert payload["summary"].strip()
     assert payload["summary"].strip() not in {"content", "[concise] content"}

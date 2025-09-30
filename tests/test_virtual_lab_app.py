@@ -456,8 +456,9 @@ def test_summarize_returns_summary(app: VirtualLabApp) -> None:
             "params": {"text": "This is a long text", "style": "bullet"},
         }
     )
-
+    print(f"\n@ test_summarize_returns_summary: response = {response}")
     result = response["result"]
+    print(f"\n@ test_summarize_returns_summary: result = {result}")
     assert result["summary"].startswith("[bullet]")
     assert response["graph_delta"] == {"added_nodes": [], "added_edges": [], "updated_nodes": []}
 
