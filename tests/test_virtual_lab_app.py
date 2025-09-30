@@ -1,63 +1,31 @@
+from unittest import mock
+
 import pytest
 
 from virtuallab.api import VirtualLabApp
-from virtuallab.exec.runner import StepRunner
+from virtuallab.exec.adapters import engineer
 from virtuallab.graph.model import EdgeType, NodeType
-from virtuallab.graph.rules import (
-    AutoLinkCandidate,
-    AutoLinkContext,
-    AutoLinkProposal,
-    AutoLinkService,
-)
-from virtuallab.knowledge import SummaryService
-
-
-class _StubStepAdapter:
-    def run(self, *, step_id: str, payload: dict) -> dict:
-        return {
-            "step_id": step_id,
-            "output": f"ran:{payload.get('text', '')}",
-            "status": "completed",
-            "run_id": "run_stub",
-        }
-
-
-class _StubSummarizer:
-    def summarize(self, *, text: str, style: str | None = None) -> str:
-        prefix = f"[{style}] " if style else ""
-        return prefix + text[:50]
-
-
-class _StubAutoLinkAdapter:
-    def propose_links(self, *, context: AutoLinkContext) -> AutoLinkProposal:
-        steps = [node for node in context.nodes if node.get("type") == NodeType.STEP.value]
-        steps.sort(key=lambda node: node.get("attributes", {}).get("name", ""))
-        if len(steps) < 2:
-            return AutoLinkProposal(candidates=())
-
-        source, target = steps[0], steps[1]
-        candidate = AutoLinkCandidate(
-            source=source["id"],
-            target=target["id"],
-            type=EdgeType.FOLLOWS,
-            rationale="Later step follows the earlier step in the plan",
-            confidence=0.9,
-            attributes={"ts": target.get("attributes", {}).get("created_at")},
-        )
-        return AutoLinkProposal(candidates=[candidate], analysis="Linked sequential steps")
+from virtuallab.graph.rules import AutoLinkCandidate, AutoLinkContext, AutoLinkProposal
 
 
 @pytest.fixture()
-def app():
-    runner = StepRunner()
-    runner.register_adapter("engineer", _StubStepAdapter())
-    summary_service = SummaryService(adapter=_StubSummarizer())
-    auto_link_service = AutoLinkService(adapter=_StubAutoLinkAdapter())
-    return VirtualLabApp(
-        step_runner=runner,
-        summary_service=summary_service,
-        auto_link_service=auto_link_service,
+def app(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "virtuallab.api.OpenAILLMSummarizerAdapter",
+        mock.Mock(side_effect=ModuleNotFoundError("openai missing")),
+        raising=False,
     )
+    monkeypatch.setattr(
+        "virtuallab.api.OpenAIAutoLinkAdapter",
+        mock.Mock(side_effect=RuntimeError("openai missing")),
+        raising=False,
+    )
+
+    app = VirtualLabApp()
+    stub_client = mock.Mock()
+    stub_client.run.side_effect = lambda prompt, tools=None: f"ran:{prompt}:{len(tools or [])}"
+    app.step_runner.register_adapter("engineer", engineer.EngineerAdapter(client=stub_client))
+    return app
 
 
 def _create_plan(app: VirtualLabApp, **overrides) -> str:
@@ -237,11 +205,30 @@ def test_link_adds_edge(app: VirtualLabApp) -> None:
     assert EdgeType.ASSOCIATED_WITH.value in edge_data
 
 
-def test_auto_link_generates_follow_edges(app: VirtualLabApp) -> None:
+def test_auto_link_generates_follow_edges(app: VirtualLabApp, monkeypatch: pytest.MonkeyPatch) -> None:
     plan_id = _create_plan(app)
     subtask_id = _add_subtask(app, plan_id)
     first_step = _add_step(app, subtask_id, name="Collect data")
     second_step = _add_step(app, subtask_id, name="Train model")
+
+    assert app.auto_link_service is not None
+
+    def _propose_links(*, context: AutoLinkContext) -> AutoLinkProposal:
+        steps = [node for node in context.nodes if node.get("type") == NodeType.STEP.value]
+        steps.sort(key=lambda node: node.get("attributes", {}).get("created_at", ""))
+        if len(steps) < 2:
+            return AutoLinkProposal(candidates=())
+        candidate = AutoLinkCandidate(
+            source=steps[0]["id"],
+            target=steps[1]["id"],
+            type=EdgeType.FOLLOWS,
+            rationale="Ordered execution",
+            confidence=0.75,
+            attributes={"position": 1},
+        )
+        return AutoLinkProposal(candidates=[candidate], analysis="deterministic test linkage")
+
+    monkeypatch.setattr(app.auto_link_service.adapter, "propose_links", _propose_links, raising=False)
 
     response = app.handle(
         {
@@ -256,6 +243,7 @@ def test_auto_link_generates_follow_edges(app: VirtualLabApp) -> None:
     assert link["source"] == first_step
     assert link["target"] == second_step
     assert link["type"] == EdgeType.FOLLOWS.value
+    assert link["attributes"]["position"] == 1
     assert response["graph_delta"]["added_edges"][0]["source"] == first_step
 
     edge_data = app.graph_store.graph.get_edge_data(first_step, second_step)
@@ -263,11 +251,27 @@ def test_auto_link_generates_follow_edges(app: VirtualLabApp) -> None:
     assert EdgeType.FOLLOWS.value in edge_data
 
 
-def test_auto_link_skips_duplicates(app: VirtualLabApp) -> None:
+def test_auto_link_skips_duplicates(app: VirtualLabApp, monkeypatch: pytest.MonkeyPatch) -> None:
     plan_id = _create_plan(app)
     subtask_id = _add_subtask(app, plan_id)
     _add_step(app, subtask_id, name="Collect data")
     _add_step(app, subtask_id, name="Train model")
+
+    assert app.auto_link_service is not None
+
+    def _propose_links(*, context: AutoLinkContext) -> AutoLinkProposal:
+        steps = [node for node in context.nodes if node.get("type") == NodeType.STEP.value]
+        steps.sort(key=lambda node: node.get("attributes", {}).get("created_at", ""))
+        if len(steps) < 2:
+            return AutoLinkProposal(candidates=())
+        candidate = AutoLinkCandidate(
+            source=steps[0]["id"],
+            target=steps[1]["id"],
+            type=EdgeType.FOLLOWS,
+        )
+        return AutoLinkProposal(candidates=[candidate])
+
+    monkeypatch.setattr(app.auto_link_service.adapter, "propose_links", _propose_links, raising=False)
 
     first_response = app.handle({"action": "auto_link", "params": {"scope": {"plan_id": plan_id}}})
     assert first_response["result"]["applied"]
@@ -412,14 +416,16 @@ def test_run_step_updates_step_node(app: VirtualLabApp) -> None:
 
     result = response["result"]
     assert result["status"] == "completed"
-    assert result["run_id"] == "run_stub"
-    assert result["output"] == "ran:do something"
+    assert result["run_id"].startswith("run_")
+    assert result["output"] == "ran:do something:0"
+    assert result["details"]["tool"] == "engineer"
+    assert result["details"]["step_id"] == step_id
 
     node = app.graph_store.get_node(step_id)
     assert node is not None
     assert node.attributes["status"] == "completed"
-    assert node.attributes["last_run_output"] == "ran:do something"
-    assert node.attributes["run_id"] == "run_stub"
+    assert node.attributes["last_run_output"] == "ran:do something:0"
+    assert node.attributes["run_id"] == result["run_id"]
 
     updated_nodes = response["graph_delta"]["updated_nodes"]
     assert updated_nodes and updated_nodes[0]["id"] == step_id
