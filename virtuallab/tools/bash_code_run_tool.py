@@ -154,11 +154,20 @@ def monitor_process_tree(procs):
     for p in procs:
         try:
             total_cpu += p.cpu_percent(interval=0.1)
-            io_counters = p.io_counters()
-            total_read_bytes += io_counters.read_bytes
-            total_write_bytes += io_counters.write_bytes
         except psutil.NoSuchProcess:
             time.sleep(1)
+            continue
+        except Exception:
+            pass
+
+        # io_counters 在某些平台（如 macOS）可能不存在或未实现
+        try:
+            io_counters = p.io_counters() if hasattr(p, "io_counters") else None
+        except (psutil.NoSuchProcess, psutil.AccessDenied, NotImplementedError, AttributeError):
+            io_counters = None
+        if io_counters:
+            total_read_bytes += getattr(io_counters, "read_bytes", 0.0) or 0.0
+            total_write_bytes += getattr(io_counters, "write_bytes", 0.0) or 0.0
     return total_cpu, total_read_bytes, total_write_bytes
 
 
@@ -406,10 +415,10 @@ class AgentCodeExecutor:
             self.bashcode_prefix = [
                 '#!/bin/bash',
                 'set -e',
-                # 'shopt -s expand_aliases',
-                # f"export MAMBA_ROOT_PREFIX={self.conda_home}",
-                # f"export PATH={self.conda_home}bin:{self.conda_home}envs/{self.conda_bioenv}/bin:{self.conda_home}envs/{self.conda_renv}/bin:" + "${PATH}",
-                # 'eval "$(conda shell.bash hook)"',
+                'shopt -s expand_aliases',
+                f"export MAMBA_ROOT_PREFIX={self.conda_home}",
+                f"export PATH={self.conda_home}bin:{self.conda_home}envs/{self.conda_bioenv}/bin:{self.conda_home}envs/{self.conda_renv}/bin:" + "${PATH}",
+                'eval "$(conda shell.bash hook)"',
                 'echo "channels:',
                 "  - conda-forge",
                 "  - bioconda",

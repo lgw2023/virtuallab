@@ -67,7 +67,6 @@ class SmolagentsEngineerClient:
                 "LLM_MODEL, LLM_MODEL_URL, and LLM_MODEL_API_KEY environment variables "
                 "must be set when 'model' is not provided to SmolagentsEngineerClient."
             )
-        print(f"model_id: {model_id} api_base: {api_base} api_key: {api_key}")
         return self._OpenAIServerModel(
             model_id=model_id, api_base=api_base, api_key=api_key,
             client_kwargs={"http_client": httpx.Client(proxy=get_env('http_proxy_port'), verify=False)}
