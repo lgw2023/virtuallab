@@ -54,9 +54,8 @@ class OpenAILLMSummarizerAdapter:
 
     def __post_init__(self) -> None:
         if self.completion_func is None:
-            from virtuallab.exec.adapters.openai_model import gpt_4o_mini_complete
-
-            self.completion_func = gpt_4o_mini_complete
+            from virtuallab.exec.adapters.openai_model import openai_complete
+            self.completion_func = openai_complete
 
     def summarize(self, *, text: str, style: str | None = None) -> str:
         prompt = self._build_prompt(text=text, style=style)

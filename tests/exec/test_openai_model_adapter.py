@@ -47,7 +47,7 @@ async def test_openai_complete_returns_content(openai_config: dict[str, str]) ->
         prompt="Respond with a short confirmation for integration testing.",
         system_prompt="You are verifying connectivity for the VirtualLab test suite.",
     )
-
+    print(f"\n@ test_openai_complete_returns_content: {response}")
     assert isinstance(response, str)
     assert response.strip(), "Expected the LLM to return non-empty content"
 
@@ -72,6 +72,7 @@ async def test_openai_complete_streaming_yields_chunks(
         collected.append(chunk)
 
     combined = "".join(collected).strip()
+    print(f"\n@ test_openai_complete_streaming_yields_chunks: {combined}")
     assert combined, "Expected streamed response to contain content"
     if tracker.records:
         assert all("total_tokens" in record for record in tracker.records)
@@ -91,7 +92,7 @@ async def test_openai_complete_keyword_extraction_live(openai_config: dict[str, 
         keyword_extraction=True,
         base_url=openai_config.get("base_url"),
     )
-
+    print(f"\n@ test_openai_complete_keyword_extraction_live: {response}")
     assert isinstance(response, str)
     assert response.strip(), "Expected keyword extraction to yield content"
 
