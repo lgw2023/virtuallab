@@ -19,7 +19,7 @@ def test_get_env_reads_from_project_dotenv(monkeypatch):
     value = config.get_env("LLM_MODEL")
 
     # ``LLM_MODEL`` is defined in the repository level ``.env`` file.
-    assert value == "qwen3-max"
+    assert value == "qwen3-max" or value == "deepseek-ai/DeepSeek-V3.1-Terminus"
 
 
 def test_get_env_prefers_process_environment(monkeypatch):

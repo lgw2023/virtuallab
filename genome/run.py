@@ -208,7 +208,7 @@ def ensure_subtasks(app: VirtualLabApp, plan_id: str) -> Dict[str, str]:
 
 def add_step(app: VirtualLabApp, **params: Any) -> str:
     response = app.handle({"action": "add_step", "params": params})
-    return response["result"]["step_id"]
+    return response["result"]["step_id"], response
 
 
 def link_steps(app: VirtualLabApp, source: str, target: str, edge_type: EdgeType = EdgeType.FOLLOWS) -> None:
@@ -270,7 +270,7 @@ def plan_sample_workflow(
     for path in (qc_dir, trim_dir, align_dir, quant_dir):
         path.mkdir(parents=True, exist_ok=True)
 
-    qc_step = add_step(
+    qc_step, qc_response = add_step(
         app,
         subtask_id=subtask_id,
         name=f"QC {sample.data.name}",
@@ -280,7 +280,7 @@ def plan_sample_workflow(
     )
 
     trimmed_fastq = trim_dir / f"{sample.sample_id}.trimmed.fastq.gz"
-    trim_step = add_step(
+    trim_step, trim_response = add_step(
         app,
         subtask_id=subtask_id,
         name=f"Trim adapters {sample.data.name}",
@@ -295,7 +295,7 @@ def plan_sample_workflow(
     link_steps(app, qc_step, trim_step)
 
     bam_path = align_dir / f"{sample.sample_id}.Aligned.sortedByCoord.out.bam"
-    align_step = add_step(
+    align_step, align_response = add_step(
         app,
         subtask_id=subtask_id,
         name=f"Align {sample.data.name}",
@@ -313,7 +313,7 @@ def plan_sample_workflow(
     link_steps(app, index_step, align_step, edge_type=EdgeType.DEPENDS_ON)
 
     counts_file = quant_dir / f"{sample.sample_id}.featureCounts.txt"
-    quant_step = add_step(
+    quant_step, quant_response = add_step(
         app,
         subtask_id=subtask_id,
         name=f"Quantify {sample.data.name}",
@@ -355,7 +355,7 @@ def plan_differential_expression(
         "counts_files": {res.sample.sample_id: str(res.counts_file) for res in results},
         "output_matrix": str(matrix_path),
     }
-    counts_step = add_step(
+    counts_step, counts_response = add_step(
         app,
         subtask_id=subtask_id,
         name="Assemble counts matrix",
@@ -374,7 +374,7 @@ def plan_differential_expression(
         "test_design": {"control": "LoGlu", "treatment": "HiGlu"},
         "output_table": str(de_table_path),
     }
-    de_step = add_step(
+    de_step, de_response = add_step(
         app,
         subtask_id=subtask_id,
         name="Differential expression analysis",
@@ -471,7 +471,7 @@ def main() -> None:
 
     reference_subtask_id = subtasks["Prepare reference assets"]
     print(f"reference_subtask_id: {reference_subtask_id}")
-    index_step = build_reference_index(app, reference_subtask_id, reference_entries, output_dir)
+    index_step, index_response = build_reference_index(app, reference_subtask_id, reference_entries, output_dir)
     print(f"index_step: {index_step}")
 
     adapter_entry = reference_entries["TruSeq3-SE.fa"]

@@ -132,4 +132,4 @@ class EngineerAdapter:
         prompt: str = payload.get("text", "")
         tools = payload.get("tools") or []
         output = self.client.run(prompt, tools=tools)
-        return {"step_id": step_id, "output": output}
+        return {"step_id": step_id, "output": output, "tools": tools}

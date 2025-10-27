@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Optional
 
 from virtuallab.graph.ids import new_id, utc_now
@@ -350,6 +351,7 @@ class VirtualLabApp:
 
         payload = params.get("payload") or {}
         execution_details = self.step_runner.run(tool=tool, step_id=step_id, payload=payload)
+        print(f"execution_details: {json.dumps(execution_details, indent=2, ensure_ascii=False)}")
         execution_record = dict(execution_details)
         execution_record.setdefault("step_id", step_id)
         execution_record.setdefault("tool", tool)
