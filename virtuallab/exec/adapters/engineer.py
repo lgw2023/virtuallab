@@ -1,5 +1,6 @@
 """Adapter for the Engineer autonomous agent."""
 from __future__ import annotations
+
 import httpx
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Protocol
@@ -53,10 +54,12 @@ class SmolagentsEngineerClient:
         }
         if self.tool_factories:
             self._tool_registry.update(self.tool_factories)
-        if self.model is None:
-            self.model = self._create_default_model()
+        self._proxy_url = get_env("http_proxy_port") or None
+        self._owns_model = self.model is None
+        if self._owns_model:
+            self.model = self._create_default_model(proxy_url=self._proxy_url)
 
-    def _create_default_model(self) -> Any:
+    def _create_default_model(self, *, proxy_url: str | None) -> Any:
         """Instantiate :class:`OpenAIServerModel` using environment variables."""
 
         model_id = get_env("LLM_MODEL")
@@ -67,9 +70,14 @@ class SmolagentsEngineerClient:
                 "LLM_MODEL, LLM_MODEL_URL, and LLM_MODEL_API_KEY environment variables "
                 "must be set when 'model' is not provided to SmolagentsEngineerClient."
             )
+        client_kwargs: dict[str, Any] = {}
+        if proxy_url:
+            client_kwargs["http_client"] = httpx.Client(proxy=proxy_url, verify=False)
         return self._OpenAIServerModel(
-            model_id=model_id, api_base=api_base, api_key=api_key,
-            client_kwargs={"http_client": httpx.Client(proxy=get_env('http_proxy_port'), verify=False)}
+            model_id=model_id,
+            api_base=api_base,
+            api_key=api_key,
+            client_kwargs=client_kwargs,
         )
 
     def _resolve_tools(self, tools: list[str] | None) -> list[Any]:
@@ -86,13 +94,30 @@ class SmolagentsEngineerClient:
         return resolved
 
     def run(self, prompt: str, *, tools: list[str] | None = None) -> str:
-        agent = self._ToolCallingAgent(
-            tools=self._resolve_tools(tools),
-            model=self.model,
-            stream_outputs=self.stream_outputs,
-        )
-        result = agent.run(prompt)
-        return result.strip() if isinstance(result, str) else str(result)
+        attempts = 1
+        if self._owns_model and self._proxy_url:
+            attempts = 2
+
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            agent = self._ToolCallingAgent(
+                tools=self._resolve_tools(tools),
+                model=self.model,
+                stream_outputs=self.stream_outputs,
+            )
+            try:
+                result = agent.run(prompt)
+            except Exception as exc:  # pragma: no cover - network failures
+                last_error = exc
+                if attempt == 0 and attempts > 1:
+                    self._proxy_url = None
+                    self.model = self._create_default_model(proxy_url=None)
+                    continue
+                return str(exc)
+
+            return result.strip() if isinstance(result, str) else str(result)
+
+        return "" if last_error is None else str(last_error)
 
 
 @dataclass
