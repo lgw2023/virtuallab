@@ -75,8 +75,30 @@ class SampleWorkflowResult:
 
     sample: SampleEntry
     steps: List[str]
-    quant_step: str
+    terminal_step: str
     counts_file: Path
+
+
+@dataclass(frozen=True)
+class StageResult:
+    """Pass planning results between sequential workflow stages."""
+
+    anchor_step: str
+    steps: Mapping[str, str]
+    artifacts: Mapping[str, Any]
+    order: List[str] | None = None
+
+    def primary_step(self) -> str:
+        return self.steps.get("primary", self.anchor_step)
+
+    def ordered_steps(self) -> List[str]:
+        if self.order:
+            return list(self.order)
+        if self.steps:
+            return list(self.steps.values())
+        if self.anchor_step:
+            return [self.anchor_step]
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +251,7 @@ def build_reference_index(
     subtask_id: str,
     reference_assets: Dict[str, DataEntry],
     output_dir: Path,
-) -> str:
+) -> StageResult:
     reference_fasta = reference_assets["mm39.fa"].resolved
     annotation = reference_assets.get("mm39.ncbiRefSeq.gtf")
     index_dir = output_dir / "indices" / "star_mm39"
@@ -240,13 +262,19 @@ def build_reference_index(
         "output_dir": str(index_dir),
         "sjdb_overhang": 100,
     }
-    return add_step(
+    index_step, index_response = add_step(
         app,
         subtask_id=subtask_id,
         name="Build STAR index",
         tool="rnaseq-index",
         inputs=inputs,
         labels=["indexing", "reference"],
+    )
+    return StageResult(
+        anchor_step=index_step,
+        steps={"primary": index_step},
+        artifacts={"primary": index_dir, "raw_response": index_response},
+        order=[index_step],
     )
 
 
@@ -257,10 +285,10 @@ def plan_sample_workflow(
     adapter: DataEntry,
     reference_fasta: DataEntry,
     annotation: DataEntry | None,
-    index_step: str,
+    upstream_stage: StageResult,
     output_dir: Path,
 ) -> SampleWorkflowResult:
-    """Create QC, trimming, alignment and quantification steps for one sample."""
+    """Create per-sample steps while depending on a prior planning stage."""
 
     sample_dir = output_dir / sample.group / sample.sample_id
     qc_dir = sample_dir / "qc"
@@ -310,7 +338,7 @@ def plan_sample_workflow(
         labels=["alignment", sample.group.lower()],
     )
     link_steps(app, trim_step, align_step)
-    link_steps(app, index_step, align_step, edge_type=EdgeType.DEPENDS_ON)
+    link_steps(app, upstream_stage.primary_step(), align_step, edge_type=EdgeType.DEPENDS_ON)
 
     counts_file = quant_dir / f"{sample.sample_id}.featureCounts.txt"
     quant_step, quant_response = add_step(
@@ -329,7 +357,7 @@ def plan_sample_workflow(
     return SampleWorkflowResult(
         sample=sample,
         steps=[qc_step, trim_step, align_step, quant_step],
-        quant_step=quant_step,
+        terminal_step=quant_step,
         counts_file=counts_file,
     )
 
@@ -337,14 +365,14 @@ def plan_sample_workflow(
 def plan_differential_expression(
     app: VirtualLabApp,
     subtask_id: str,
-    sample_results: Iterable[SampleWorkflowResult],
+    upstream_samples: Iterable[SampleWorkflowResult],
     output_dir: Path,
-) -> Dict[str, str]:
-    """Add steps to build a counts matrix and run differential expression."""
+) -> StageResult:
+    """Add post-sample steps that consume upstream sample workflows."""
 
-    results = list(sample_results)
+    results = list(upstream_samples)
     if not results:
-        return {}
+        return StageResult(anchor_step="", steps={}, artifacts={})
 
     de_dir = output_dir / "differential_expression"
     de_dir.mkdir(parents=True, exist_ok=True)
@@ -365,7 +393,7 @@ def plan_differential_expression(
     )
 
     for res in results:
-        link_steps(app, res.quant_step, counts_step, edge_type=EdgeType.DEPENDS_ON)
+        link_steps(app, res.terminal_step, counts_step, edge_type=EdgeType.DEPENDS_ON)
 
     sample_groups = {res.sample.sample_id: res.sample.group for res in results}
     de_inputs = {
@@ -384,7 +412,15 @@ def plan_differential_expression(
     )
     link_steps(app, counts_step, de_step)
 
-    return {"counts_matrix": counts_step, "differential_expression": de_step}
+    return StageResult(
+        anchor_step=de_step,
+        steps={"aggregation": counts_step, "primary": de_step},
+        artifacts={
+            "primary": de_table_path,
+            "counts_matrix": matrix_path,
+        },
+        order=[counts_step, de_step],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -471,8 +507,8 @@ def main() -> None:
 
     reference_subtask_id = subtasks["Prepare reference assets"]
     print(f"reference_subtask_id: {reference_subtask_id}")
-    index_step, index_response = build_reference_index(app, reference_subtask_id, reference_entries, output_dir)
-    print(f"index_step: {index_step}")
+    reference_stage = build_reference_index(app, reference_subtask_id, reference_entries, output_dir)
+    print(f"reference_stage: {reference_stage}")
 
     adapter_entry = reference_entries["TruSeq3-SE.fa"]
     print(f"adapter_entry: {adapter_entry}")
@@ -501,7 +537,7 @@ def main() -> None:
                 adapter_entry,
                 reference_fasta_entry,
                 annotation_entry,
-                index_step,
+                reference_stage,
                 output_dir,
             )
             created_steps[sample.sample_id] = result.steps
@@ -509,12 +545,12 @@ def main() -> None:
     print(f"created_steps: {created_steps}")
 
     de_subtask_id = subtasks["Differential expression analysis"]
-    de_steps = plan_differential_expression(app, de_subtask_id, sample_results, output_dir)
-    print(f"de_steps: {de_steps}")
+    de_stage = plan_differential_expression(app, de_subtask_id, sample_results, output_dir)
+    print(f"de_stage: {de_stage}")
 
-    execution_order = [index_step]
+    execution_order = reference_stage.ordered_steps()
     execution_order.extend(step_id for res in sample_results for step_id in res.steps)
-    execution_order.extend(step_id for step_id in de_steps.values())
+    execution_order.extend(de_stage.ordered_steps())
 
     print("RNA-seq analysis plan successfully created")
     print(f"Plan ID: {plan_id}")
