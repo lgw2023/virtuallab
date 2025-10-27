@@ -558,9 +558,9 @@ def main() -> None:
     print("Sample step overview:")
     for sample_id, steps in sorted(created_steps.items()):
         print(f"  - {sample_id}: {len(steps)} steps ({', '.join(steps)})")
-    if de_steps:
+    if de_stage:
         print("Differential expression steps:")
-        for name, step_id in de_steps.items():
+        for name, step_id in de_stage.steps.items():
             print(f"  - {name}: {step_id}")
 
     # Convert NodeDataView/EdgeDataView to list before json serialization
