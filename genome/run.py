@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping
 
@@ -331,20 +332,30 @@ def main() -> None:
 
     app = VirtualLabApp()
     plan_id = create_plan(app, config)
+    print(f"plan_id: {plan_id}")
     subtasks = ensure_subtasks(app, plan_id)
+    print(f"subtasks: {subtasks}")
 
     reference_entries = {entry.name: entry for entry in data_entries if not entry.is_fastq()}
+    print(f"reference_entries: {reference_entries}")
     reference_ids = register_reference_data(app, plan_id, reference_entries.values())
+    print(f"reference_ids: {reference_ids}")
 
     output_dir = (case_dir / config.get("output_dir", "output")).resolve()
+    print(f"output_dir: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     reference_subtask_id = subtasks["Prepare reference assets"]
+    print(f"reference_subtask_id: {reference_subtask_id}")
     index_step = build_reference_index(app, reference_subtask_id, reference_entries, output_dir)
+    print(f"index_step: {index_step}")
 
     adapter_entry = reference_entries["TruSeq3-SE.fa"]
+    print(f"adapter_entry: {adapter_entry}")
     reference_fasta_entry = reference_entries["mm39.fa"]
+    print(f"reference_fasta_entry: {reference_fasta_entry}")
     annotation_entry = reference_entries.get("mm39.ncbiRefSeq.gtf")
+    print(f"annotation_entry: {annotation_entry}")
 
     samples_by_group: Dict[str, List[SampleEntry]] = defaultdict(list)
     for entry in data_entries:
@@ -352,6 +363,7 @@ def main() -> None:
             continue
         group = "LoGlu" if "LoGlu" in entry.description else "HiGlu"
         samples_by_group[group].append(SampleEntry(entry, group))
+    print(f"samples_by_group: {samples_by_group}")
 
     created_steps: Dict[str, List[str]] = {}
     for group, samples in samples_by_group.items():
@@ -367,6 +379,7 @@ def main() -> None:
                 index_step,
                 output_dir,
             )
+    print(f"created_steps: {created_steps}")
 
     print("RNA-seq analysis plan successfully created")
     print(f"Plan ID: {plan_id}")
@@ -374,6 +387,10 @@ def main() -> None:
     print("Sample step overview:")
     for sample_id, steps in sorted(created_steps.items()):
         print(f"  - {sample_id}: {len(steps)} steps ({', '.join(steps)})")
+
+    # Convert NodeDataView/EdgeDataView to list before json serialization
+    print(f"app.graph_store.graph nodes: {json.dumps(list(app.graph_store.graph.nodes(data=True)), indent=2)}")
+    # print(f"app.graph_store.graph edges: {json.dumps(list(app.graph_store.graph.edges(data=True)), indent=2)}")
 
 
 if __name__ == "__main__":

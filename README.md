@@ -52,10 +52,9 @@ virtuallab/
 │   └── summarize.py        # SummaryService，对外部总结适配器的轻封装
 ├── obs/
 │   └── events.py           # Event、EventBus，可追加查询事件
-├── persist/
-│   ├── export.py           # GraphExporter，占位支持 JSON/GraphML
-│   └── snapshot.py         # SnapshotManager，提供快照与回滚接口
-└── llm.py                  # OpenAI 相关客户端与工具（占位）
+└── persist/
+    ├── export.py           # GraphExporter，占位支持 JSON/GraphML
+    └── snapshot.py         # SnapshotManager，提供快照与回滚接口
 ```
 
 ## 默认动作（Actions）

@@ -1,4 +1,4 @@
-goal_description: please help me to map the reads to mouse genome,
+goal_description: please help me to map the reads to mouse genome, and generate the counts matrix, finally get the differential expression analysis results.
 data_list: 
   ./data/SRR1374921.fastq.gz: single-end mouse rna-seq reads, replicate 1 in LoGlu group
   ./data/SRR1374922.fastq.gz: single-end mouse rna-seq reads, replicate 2 in LoGlu group
