@@ -5,7 +5,7 @@ example data shipped in ``genome/data``.  The pipeline captures the key stages
 of a typical single-end RNA-seq experiment:
 
 * register the reference genome, annotation and adapter resources
-* build a STAR genome index
+* build a HISAT2 genome index
 * per-replicate quality control, adapter trimming, alignment and gene counting
 * aggregate counts into a matrix and plan a differential expression comparison
 
@@ -254,18 +254,18 @@ def build_reference_index(
 ) -> StageResult:
     reference_fasta = reference_assets["mm39.fa"].resolved
     annotation = reference_assets.get("mm39.ncbiRefSeq.gtf")
-    index_dir = output_dir / "indices" / "star_mm39"
+    index_dir = output_dir / "indices" / "HISAT2_mm39"
     index_dir.mkdir(parents=True, exist_ok=True)
     inputs = {
         "reference_fasta": str(reference_fasta),
-        "annotation_gtf": str(annotation.resolved if annotation else ""),
+        # "annotation_gtf": str(annotation.resolved if annotation else ""),
         "output_dir": str(index_dir),
-        "sjdb_overhang": 100,
+        # "sjdb_overhang": 100,
     }
     index_step, index_response = add_step(
         app,
         subtask_id=subtask_id,
-        name="Build STAR index",
+        name="Build HISAT2 index",
         tool="rnaseq-index",
         inputs=inputs,
         labels=["indexing", "reference"],
@@ -333,7 +333,7 @@ def plan_sample_workflow(
             "reference_fasta": str(reference_fasta.resolved),
             "annotation_gtf": str(annotation.resolved if annotation else ""),
             "output_bam": str(bam_path),
-            "aligner": "STAR",
+            "aligner": "HISAT2",
         },
         labels=["alignment", sample.group.lower()],
     )

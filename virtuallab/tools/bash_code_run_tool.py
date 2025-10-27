@@ -952,8 +952,7 @@ class BashCodeRunToolWrapper:
             return f'Code Execute Statu: Success! Log: {blocked_log}'
         else:
             print_colored(f'### Code Execute Statu: Success {execute_statu}!', 'ORANGE', self.debug)
-            return f'Code Execute Statu: Success!'
-
+            return f'Code Execute Statu: Success! Log: {execute_log}'
 
 from smolagents import Tool
 
