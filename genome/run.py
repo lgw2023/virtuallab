@@ -7,6 +7,7 @@ of a typical single-end RNA-seq experiment:
 * register the reference genome, annotation and adapter resources
 * build a STAR genome index
 * per-replicate quality control, adapter trimming, alignment and gene counting
+* aggregate counts into a matrix and plan a differential expression comparison
 
 The resulting execution plan is stored inside the in-memory VirtualLab graph
 and summarised to stdout so it can serve as a blueprint for downstream runs.
@@ -66,6 +67,16 @@ class SampleEntry:
     def sample_id(self) -> str:
         # ``SRR1374921.fastq.gz`` -> ``SRR1374921``
         return self.data.name.split(".")[0]
+
+
+@dataclass(frozen=True)
+class SampleWorkflowResult:
+    """Summary of all steps constructed for one sequencing replicate."""
+
+    sample: SampleEntry
+    steps: List[str]
+    quant_step: str
+    counts_file: Path
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +190,7 @@ def ensure_subtasks(app: VirtualLabApp, plan_id: str) -> Dict[str, str]:
         ("Prepare reference assets", ["rna-seq", "reference"]),
         ("LoGlu replicate alignment", ["rna-seq", "loglu"]),
         ("HiGlu replicate alignment", ["rna-seq", "higlu"]),
+        ("Differential expression analysis", ["rna-seq", "differential-expression"]),
     ):
         response = app.handle(
             {
@@ -247,7 +259,7 @@ def plan_sample_workflow(
     annotation: DataEntry | None,
     index_step: str,
     output_dir: Path,
-) -> List[str]:
+) -> SampleWorkflowResult:
     """Create QC, trimming, alignment and quantification steps for one sample."""
 
     sample_dir = output_dir / sample.group / sample.sample_id
@@ -314,7 +326,65 @@ def plan_sample_workflow(
         labels=["quantification", sample.group.lower()],
     )
     link_steps(app, align_step, quant_step)
-    return [qc_step, trim_step, align_step, quant_step]
+    return SampleWorkflowResult(
+        sample=sample,
+        steps=[qc_step, trim_step, align_step, quant_step],
+        quant_step=quant_step,
+        counts_file=counts_file,
+    )
+
+
+def plan_differential_expression(
+    app: VirtualLabApp,
+    subtask_id: str,
+    sample_results: Iterable[SampleWorkflowResult],
+    output_dir: Path,
+) -> Dict[str, str]:
+    """Add steps to build a counts matrix and run differential expression."""
+
+    results = list(sample_results)
+    if not results:
+        return {}
+
+    de_dir = output_dir / "differential_expression"
+    de_dir.mkdir(parents=True, exist_ok=True)
+    matrix_path = de_dir / "counts_matrix.tsv"
+    de_table_path = de_dir / "differential_expression.tsv"
+
+    counts_inputs = {
+        "counts_files": {res.sample.sample_id: str(res.counts_file) for res in results},
+        "output_matrix": str(matrix_path),
+    }
+    counts_step = add_step(
+        app,
+        subtask_id=subtask_id,
+        name="Assemble counts matrix",
+        tool="counts-matrix",
+        inputs=counts_inputs,
+        labels=["quantification", "aggregation"],
+    )
+
+    for res in results:
+        link_steps(app, res.quant_step, counts_step, edge_type=EdgeType.DEPENDS_ON)
+
+    sample_groups = {res.sample.sample_id: res.sample.group for res in results}
+    de_inputs = {
+        "counts_matrix": str(matrix_path),
+        "sample_groups": sample_groups,
+        "test_design": {"control": "LoGlu", "treatment": "HiGlu"},
+        "output_table": str(de_table_path),
+    }
+    de_step = add_step(
+        app,
+        subtask_id=subtask_id,
+        name="Differential expression analysis",
+        tool="deseq2",
+        inputs=de_inputs,
+        labels=["differential-expression"],
+    )
+    link_steps(app, counts_step, de_step)
+
+    return {"counts_matrix": counts_step, "differential_expression": de_step}
 
 
 # ---------------------------------------------------------------------------
@@ -366,10 +436,11 @@ def main() -> None:
     print(f"samples_by_group: {samples_by_group}")
 
     created_steps: Dict[str, List[str]] = {}
+    sample_results: List[SampleWorkflowResult] = []
     for group, samples in samples_by_group.items():
         subtask_id = subtasks[f"{group} replicate alignment"]
         for sample in samples:
-            created_steps[sample.sample_id] = plan_sample_workflow(
+            result = plan_sample_workflow(
                 app,
                 sample,
                 subtask_id,
@@ -379,7 +450,13 @@ def main() -> None:
                 index_step,
                 output_dir,
             )
+            created_steps[sample.sample_id] = result.steps
+            sample_results.append(result)
     print(f"created_steps: {created_steps}")
+
+    de_subtask_id = subtasks["Differential expression analysis"]
+    de_steps = plan_differential_expression(app, de_subtask_id, sample_results, output_dir)
+    print(f"de_steps: {de_steps}")
 
     print("RNA-seq analysis plan successfully created")
     print(f"Plan ID: {plan_id}")
@@ -387,6 +464,10 @@ def main() -> None:
     print("Sample step overview:")
     for sample_id, steps in sorted(created_steps.items()):
         print(f"  - {sample_id}: {len(steps)} steps ({', '.join(steps)})")
+    if de_steps:
+        print("Differential expression steps:")
+        for name, step_id in de_steps.items():
+            print(f"  - {name}: {step_id}")
 
     # Convert NodeDataView/EdgeDataView to list before json serialization
     print(f"app.graph_store.graph nodes: {json.dumps(list(app.graph_store.graph.nodes(data=True)), indent=2)}")
