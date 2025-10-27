@@ -30,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from virtuallab.api import VirtualLabApp
-from virtuallab.graph.model import EdgeType
+from virtuallab.graph.model import EdgeType, NodeSpec, NodeType
 
 
 CaseConfig = Dict[str, Any]
@@ -391,6 +391,60 @@ def plan_differential_expression(
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _build_execution_prompt(step: NodeSpec) -> str:
+    """Create a textual prompt describing how to execute ``step``."""
+
+    name = step.attributes.get("name", "")
+    tool = step.attributes.get("tool", "")
+    inputs = step.attributes.get("inputs", {})
+    labels = ", ".join(step.attributes.get("labels", []))
+    instructions = [
+        "You are the execution agent for a VirtualLab workflow step.",
+        f"Step ID: {step.id}",
+        f"Step name: {name}",
+        f"Suggested tool: {tool}",
+        f"Labels: {labels}" if labels else "Labels: (none)",
+        "Inputs (JSON):",
+        json.dumps(inputs, indent=2, sort_keys=True),
+        "",
+        "Goals:",
+        "1. Perform the bioinformatics operation that corresponds to the step.",
+        "2. Operate directly on the provided input files or paths.",
+        "3. Ensure the expected output artefacts are created at the paths listed in the inputs.",
+        "4. Use shell commands (via the bash tool) or lightweight Python scripts when external tools are missing.",
+        "5. At the end, summarise the actions taken and key results produced.",
+    ]
+    return "\n".join(instructions)
+
+
+def _execute_steps(app: VirtualLabApp, step_ids: Iterable[str]) -> None:
+    """Execute each step in ``step_ids`` sequentially using the Engineer runner."""
+
+    for step_id in step_ids:
+        step = app.graph_store.get_node(step_id)
+        if step is None or step.type is not NodeType.STEP:
+            print(f"Skipping execution for unknown step: {step_id}")
+            continue
+        prompt = _build_execution_prompt(step)
+        print(f"Executing step {step_id} ({step.attributes.get('name', '')}) using Engineer runner")
+        payload = {"text": prompt, "tools": ["shell_bash"]}
+        try:
+            response = app.handle(
+                {
+                    "action": "run_step",
+                    "params": {"step_id": step_id, "tool": "engineer", "payload": payload},
+                }
+            )
+        except Exception as exc:  # pragma: no cover - runtime safety
+            print(f"Execution failed for step {step_id}: {exc}")
+            continue
+        result = response.get("result", {})
+        status = result.get("status", "unknown")
+        print(f"Step {step_id} execution status: {status}")
+        if result.get("output"):
+            print(f"Step {step_id} output: {result['output']}")
+
+
 def main() -> None:
     case_dir = Path(__file__).resolve().parent
     config = load_case_config(case_dir / "case_config.yaml")
@@ -458,6 +512,10 @@ def main() -> None:
     de_steps = plan_differential_expression(app, de_subtask_id, sample_results, output_dir)
     print(f"de_steps: {de_steps}")
 
+    execution_order = [index_step]
+    execution_order.extend(step_id for res in sample_results for step_id in res.steps)
+    execution_order.extend(step_id for step_id in de_steps.values())
+
     print("RNA-seq analysis plan successfully created")
     print(f"Plan ID: {plan_id}")
     print(f"Registered reference assets: {sorted(reference_ids)}")
@@ -471,6 +529,10 @@ def main() -> None:
 
     # Convert NodeDataView/EdgeDataView to list before json serialization
     print(f"app.graph_store.graph nodes: {json.dumps(list(app.graph_store.graph.nodes(data=True)), indent=2)}")
+
+    if execution_order:
+        print("\nStarting execution of planned steps using Engineer...")
+        _execute_steps(app, execution_order)
     # print(f"app.graph_store.graph edges: {json.dumps(list(app.graph_store.graph.edges(data=True)), indent=2)}")
 
 
