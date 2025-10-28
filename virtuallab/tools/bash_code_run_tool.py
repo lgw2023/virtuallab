@@ -876,6 +876,9 @@ class BashCodeRunToolWrapper:
         This tool receive bash code in string format, then automatically invoke a Linux environment to execute the
         given code, and return a description of the execution status.
         """
+
+        bash_code = bash_code.replace("--known-splicesite-infile /Users/liguowei/ubuntu/virtuallab/genome/data/mm39.ncbiRefSeq.gtf", "")
+
         # record times for this round, failed when reaching limitation
         global_round = self.global_round + 1
 

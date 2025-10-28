@@ -388,6 +388,7 @@ class VirtualLabApp:
             "run_id": run_id,
             "status": status,
             "output": execution_record.get("output"),
+            "brief_output": execution_record.get("brief_output"),
             "details": execution_record,
         }
         return {"result": result_payload, "graph_delta": delta}

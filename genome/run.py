@@ -266,7 +266,7 @@ def build_reference_index(
         app,
         subtask_id=subtask_id,
         name="Build HISAT2 index",
-        tool="rnaseq-index",
+        tool="HISAT2",
         inputs=inputs,
         labels=["indexing", "reference"],
     )
@@ -312,25 +312,25 @@ def plan_sample_workflow(
         app,
         subtask_id=subtask_id,
         name=f"Trim adapters {sample.data.name}",
-        tool="trimming",
+        tool="cutadapt",
         inputs={
             "reads": str(sample.data.resolved),
             "adapter_fasta": str(adapter.resolved),
             "output_fastq": str(trimmed_fastq),
         },
-        labels=["trimming", sample.group.lower()],
+        labels=["cutadapt", sample.group.lower()],
     )
     link_steps(app, qc_step, trim_step)
 
-    bam_path = align_dir / f"{sample.sample_id}.Aligned.sortedByCoord.out.bam"
+    bam_path = align_dir / f"{sample.sample_id}.bam"
     align_step, align_response = add_step(
         app,
         subtask_id=subtask_id,
         name=f"Align {sample.data.name}",
-        tool="rna-seq-mapping",
+        tool="hisat2",
         inputs={
             "reads": str(trimmed_fastq),
-            "reference_fasta": str(reference_fasta.resolved),
+            "reference_genome_index": "find the related HISAT2 index file under the data or output directory by yourself",
             "annotation_gtf": str(annotation.resolved if annotation else ""),
             "output_bam": str(bam_path),
             "aligner": "HISAT2",
@@ -345,7 +345,7 @@ def plan_sample_workflow(
         app,
         subtask_id=subtask_id,
         name=f"Quantify {sample.data.name}",
-        tool="feature-counts",
+        tool="featureCounts",
         inputs={
             "bam": str(bam_path),
             "annotation_gtf": str(annotation.resolved if annotation else ""),
@@ -387,7 +387,7 @@ def plan_differential_expression(
         app,
         subtask_id=subtask_id,
         name="Assemble counts matrix",
-        tool="counts-matrix",
+        tool="pandas",
         inputs=counts_inputs,
         labels=["quantification", "aggregation"],
     )
@@ -406,7 +406,7 @@ def plan_differential_expression(
         app,
         subtask_id=subtask_id,
         name="Differential expression analysis",
-        tool="deseq2",
+        tool="R script: DESeq2",
         inputs=de_inputs,
         labels=["differential-expression"],
     )
@@ -427,7 +427,7 @@ def plan_differential_expression(
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _build_execution_prompt(step: NodeSpec) -> str:
+def _build_execution_prompt(step: NodeSpec, history_res: str) -> str:
     """Create a textual prompt describing how to execute ``step``."""
 
     name = step.attributes.get("name", "")
@@ -449,19 +449,22 @@ def _build_execution_prompt(step: NodeSpec) -> str:
         "3. Ensure the expected output artefacts are created at the paths listed in the inputs.",
         "4. Use shell commands (via the bash tool) or lightweight Python scripts when external tools are missing.",
         "5. At the end, summarise the actions taken and key results produced.",
+        "6. If the step is related to the previous steps, you should use the history_res to help you to execute the step.",
+        "History result summary:",
+        history_res,
     ]
     return "\n".join(instructions)
 
 
 def _execute_steps(app: VirtualLabApp, step_ids: Iterable[str]) -> None:
     """Execute each step in ``step_ids`` sequentially using the Engineer runner."""
-
+    history_res = ""
     for step_id in step_ids:
         step = app.graph_store.get_node(step_id)
         if step is None or step.type is not NodeType.STEP:
             print(f"Skipping execution for unknown step: {step_id}")
             continue
-        prompt = _build_execution_prompt(step)
+        prompt = _build_execution_prompt(step, history_res)
         print(f"Executing step {step_id} ({step.attributes.get('name', '')}) using Engineer runner")
         payload = {"text": prompt, "tools": ["shell_bash"]}
         try:
@@ -479,6 +482,8 @@ def _execute_steps(app: VirtualLabApp, step_ids: Iterable[str]) -> None:
         print(f"Step {step_id} execution status: {status}")
         if result.get("output"):
             print(f"Step {step_id} output: {result['output']}")
+            history_res += str(result['brief_output'])
+    return history_res
 
 
 def main() -> None:
@@ -568,7 +573,7 @@ def main() -> None:
 
     if execution_order:
         print("\nStarting execution of planned steps using Engineer...")
-        _execute_steps(app, execution_order)
+        print(_execute_steps(app, execution_order))
     # print(f"app.graph_store.graph edges: {json.dumps(list(app.graph_store.graph.edges(data=True)), indent=2)}")
 
 
