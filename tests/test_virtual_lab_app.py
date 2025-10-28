@@ -13,7 +13,12 @@ from virtuallab.graph.rules import AutoLinkCandidate, AutoLinkContext, AutoLinkP
 def app():
     app = VirtualLabApp()
     stub_client = mock.Mock()
-    stub_client.run.side_effect = lambda prompt, tools=None: f"ran:{prompt}:{len(tools or [])}"
+    stub_client.run.side_effect = (
+        lambda prompt, tools=None: {
+            "full_result": f"ran:{prompt}:{len(tools or [])}",
+            "brief_result": f"ran:{prompt}:{len(tools or [])}",
+        }
+    )
     app.step_runner.register_adapter("engineer", engineer.EngineerAdapter(client=stub_client))
     return app
 
@@ -50,6 +55,21 @@ def _add_step(app: VirtualLabApp, subtask_id: str, **overrides) -> str:
     params.update(overrides)
     response = app.handle({"action": "add_step", "params": params})
     return response["result"]["step_id"]
+
+
+def test_plan_handle_workflow(app: VirtualLabApp) -> None:
+    plan = app.plan(name="Handle plan", goal="goal", owner="owner")
+    subtask = plan.add_subtask(name="Collect samples", status="pending")
+    step = subtask.add_step(name="Assemble dataset", tool="engineer", inputs={"text": "assemble"})
+    data = plan.register_data(payload_ref="s3://bucket/file", format="json", source="manual")
+    data.link_to(step, type=EdgeType.ASSOCIATED_WITH)
+
+    timeline = plan.timeline(include=[NodeType.PLAN.value, NodeType.SUBTASK.value])
+    assert any(item["id"] == subtask.id for item in timeline)
+
+    run_result = step.run(payload={"text": "assemble"})
+    assert run_result["result"]["step_id"] == step.id
+    assert run_result["result"]["status"] == "completed"
 
 
 def test_summarize_action_invokes_llm(app: VirtualLabApp, ensure_openai_env: None) -> None:
