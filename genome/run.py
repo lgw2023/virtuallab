@@ -1,128 +1,120 @@
-"""RNA-seq alignment planning workflow using VirtualLab.
-
-This script demonstrates how to build a transcriptomics analysis plan for the
-example data shipped in ``genome/data``.  The pipeline captures the key stages
-of a typical single-end RNA-seq experiment:
-
-* register the reference genome, annotation and adapter resources
-* build a HISAT2 genome index
-* per-replicate quality control, adapter trimming, alignment and gene counting
-* aggregate counts into a matrix and plan a differential expression comparison
-
-The resulting execution plan is stored inside the in-memory VirtualLab graph
-and summarised to stdout so it can serve as a blueprint for downstream runs.
-"""
+"""RNA-seq alignment planning workflow using the VirtualLab handles API."""
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping
+from typing import Iterable, Mapping, Sequence
 
-# Ensure the repository root (which contains the ``virtuallab`` package) is
-# available on ``sys.path`` when executing the script directly.
 import sys
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from virtuallab.api import VirtualLabApp
+
+from virtuallab.api import PlanHandle, StepHandle, SubtaskHandle, VirtualLabApp
 from virtuallab.graph.model import EdgeType, NodeSpec, NodeType
 
 
-CaseConfig = Dict[str, Any]
+CaseConfig = Mapping[str, object]
 
 
 @dataclass(frozen=True)
-class DataEntry:
-    """Information about a data asset defined in the case configuration."""
+class DataAsset:
+    """Representation of one entry in ``case_config.yaml``."""
 
-    relative_path: str
+    source: str
     description: str
-    resolved: Path
+    path: Path
 
     @property
     def name(self) -> str:
-        return Path(self.relative_path).name
-
-    def exists(self) -> bool:
-        return self.resolved.exists()
-
-    def is_fastq(self) -> bool:
-        suffixes = self.resolved.suffixes
-        return any(suffix.endswith("fastq") for suffix in suffixes) or self.name.endswith(".fastq.gz")
-
-
-@dataclass(frozen=True)
-class SampleEntry:
-    """Convenience container for FASTQ-driven sample steps."""
-
-    data: DataEntry
-    group: str
+        return self.path.name
 
     @property
+    def format(self) -> str:
+        suffix = self.path.suffix.lstrip(".")
+        return suffix or "unknown"
+
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def is_fastq(self) -> bool:
+        suffixes = self.path.suffixes
+        return any(part.endswith("fastq") for part in suffixes) or self.name.endswith(".fastq.gz")
+
     def sample_id(self) -> str:
-        # ``SRR1374921.fastq.gz`` -> ``SRR1374921``
-        return self.data.name.split(".")[0]
+        return self.name.split(".")[0]
+
+    def experimental_group(self) -> str:
+        lower_desc = self.description.lower()
+        if "loglu" in lower_desc:
+            return "LoGlu"
+        if "higlu" in lower_desc:
+            return "HiGlu"
+        return "Unknown"
 
 
 @dataclass(frozen=True)
-class SampleWorkflowResult:
-    """Summary of all steps constructed for one sequencing replicate."""
-
-    sample: SampleEntry
-    steps: List[str]
-    terminal_step: str
-    counts_file: Path
+class RegisteredAsset:
+    asset: DataAsset
+    data_id: str
 
 
-@dataclass(frozen=True)
-class StageResult:
-    """Pass planning results between sequential workflow stages."""
+@dataclass
+class ReferenceStage:
+    index_step: StepHandle
+    index_dir: Path
 
-    anchor_step: str
-    steps: Mapping[str, str]
-    artifacts: Mapping[str, Any]
-    order: List[str] | None = None
 
-    def primary_step(self) -> str:
-        return self.steps.get("primary", self.anchor_step)
+@dataclass
+class SamplePlan:
+    sample: DataAsset
+    group: str
+    steps: list[StepHandle]
+    counts_table: Path
 
-    def ordered_steps(self) -> List[str]:
-        if self.order:
-            return list(self.order)
-        if self.steps:
-            return list(self.steps.values())
-        if self.anchor_step:
-            return [self.anchor_step]
-        return []
+    @property
+    def terminal_step(self) -> StepHandle:
+        return self.steps[-1]
+
+
+@dataclass
+class DifferentialExpressionPlan:
+    counts_step: StepHandle
+    differential_step: StepHandle
+    matrix_path: Path
+    results_path: Path
 
 
 # ---------------------------------------------------------------------------
 # Configuration helpers
 # ---------------------------------------------------------------------------
 
+
 def load_case_config(path: Path) -> CaseConfig:
     """Load ``case_config.yaml`` with an optional lightweight YAML fallback."""
 
-    try:  # pragma: no cover - prefer PyYAML when present
+    raw_text = path.read_text()
+    try:  # pragma: no cover - prefer PyYAML when available
         import yaml  # type: ignore
+
+        data = yaml.safe_load(raw_text)
+        if not isinstance(data, Mapping):
+            raise TypeError("case_config.yaml must contain a mapping at the top level")
+        return data
     except ModuleNotFoundError:  # pragma: no cover - executed in lean envs
-        return _parse_simple_yaml(path.read_text())
-    data = yaml.safe_load(path.read_text())
-    if not isinstance(data, MutableMapping):
-        raise TypeError("case_config.yaml must contain a mapping at the top level")
-    return dict(data)
+        return _parse_simple_yaml(raw_text)
 
 
 def _parse_simple_yaml(raw_text: str) -> CaseConfig:
     """Parse the minimal YAML structure shipped with the case study."""
 
-    result: Dict[str, Any] = {}
-    current_map: Dict[str, str] | None = None
+    result: dict[str, object] = {}
+    current_map: dict[str, str] | None = None
     for raw_line in raw_text.splitlines():
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
@@ -150,286 +142,213 @@ def _parse_simple_yaml(raw_text: str) -> CaseConfig:
 # VirtualLab orchestration helpers
 # ---------------------------------------------------------------------------
 
-def create_plan(app: VirtualLabApp, config: CaseConfig) -> str:
-    response = app.handle(
-        {
-            "action": "create_plan",
-            "params": {
-                "name": "Mouse mm39 RNA-seq alignment",
-                "goal": config.get("goal_description", ""),
-                "owner": "bioinformatics",
-                "labels": ["transcriptomics", "rna-seq", "mouse"],
-            },
-        }
+
+def load_assets(config: CaseConfig, case_dir: Path) -> list[DataAsset]:
+    data_list = config.get("data_list")
+    if not isinstance(data_list, Mapping):
+        raise TypeError("case_config.yaml must define a data_list mapping")
+
+    assets: list[DataAsset] = []
+    for relative, desc in data_list.items():
+        resolved = (case_dir / relative).resolve()
+        assets.append(DataAsset(source=str(relative), description=str(desc), path=resolved))
+    return assets
+
+
+def create_plan(app: VirtualLabApp, config: CaseConfig) -> PlanHandle:
+    goal = str(config.get("goal_description", ""))
+    return app.plan(
+        name="Mouse mm39 RNA-seq alignment",
+        goal=goal,
+        owner="bioinformatics",
+        labels=["transcriptomics", "rna-seq", "mouse"],
     )
-    return response["result"]["plan_id"]
 
 
-def register_reference_data(app: VirtualLabApp, plan_id: str, entries: Iterable[DataEntry]) -> Dict[str, str]:
-    """Register non-FASTQ reference assets and link them to the plan."""
-
-    reference_ids: Dict[str, str] = {}
-    for entry in entries:
-        if entry.is_fastq():
-            continue
+def register_references(plan: PlanHandle, assets: Iterable[DataAsset]) -> dict[str, RegisteredAsset]:
+    registered: dict[str, RegisteredAsset] = {}
+    for asset in assets:
         labels = ["reference"]
-        if "adapter" in entry.description.lower():
+        if "adapter" in asset.description.lower():
             labels.append("adapter")
-        if not entry.exists():
+        if not asset.exists():
             labels.append("missing")
-        data_response = app.handle(
-            {
-                "action": "add_data",
-                "params": {
-                    "payload_ref": str(entry.resolved),
-                    "format": entry.resolved.suffix.lstrip(".") or "fasta",
-                    "source": "case_config",
-                    "description": entry.description,
-                    "labels": labels,
-                },
-            }
+        handle = plan.register_data(
+            payload_ref=str(asset.path),
+            format=asset.format,
+            source="case_config",
+            labels=labels,
+            attributes={"description": asset.description},
         )
-        data_id = data_response["result"]["data_id"]
-        reference_ids[entry.name] = data_id
-        app.handle(
-            {
-                "action": "link",
-                "params": {
-                    "source": plan_id,
-                    "target": data_id,
-                    "type": EdgeType.USES_DATA.value,
-                },
-            }
-        )
-    return reference_ids
+        registered[asset.name] = RegisteredAsset(asset=asset, data_id=handle.id)
+    return registered
 
 
-def ensure_subtasks(app: VirtualLabApp, plan_id: str) -> Dict[str, str]:
-    """Create subtasks for reference prep and experimental groups."""
-
-    subtasks: Dict[str, str] = {}
-    for name, labels in (
-        ("Prepare reference assets", ["rna-seq", "reference"]),
-        ("LoGlu replicate alignment", ["rna-seq", "loglu"]),
-        ("HiGlu replicate alignment", ["rna-seq", "higlu"]),
-        ("Differential expression analysis", ["rna-seq", "differential-expression"]),
-    ):
-        response = app.handle(
-            {
-                "action": "add_subtask",
-                "params": {
-                    "plan_id": plan_id,
-                    "name": name,
-                    "labels": labels,
-                },
-            }
-        )
-        subtasks[name] = response["result"]["subtask_id"]
-    return subtasks
+def create_subtasks(plan: PlanHandle) -> dict[str, SubtaskHandle]:
+    return {
+        "reference": plan.add_subtask(name="Prepare reference assets", labels=["rna-seq", "reference"]),
+        "LoGlu": plan.add_subtask(name="LoGlu replicate alignment", labels=["rna-seq", "loglu"]),
+        "HiGlu": plan.add_subtask(name="HiGlu replicate alignment", labels=["rna-seq", "higlu"]),
+        "de": plan.add_subtask(
+            name="Differential expression analysis",
+            labels=["rna-seq", "differential-expression"],
+        ),
+    }
 
 
-def add_step(app: VirtualLabApp, **params: Any) -> str:
-    response = app.handle({"action": "add_step", "params": params})
-    return response["result"]["step_id"], response
-
-
-def link_steps(app: VirtualLabApp, source: str, target: str, edge_type: EdgeType = EdgeType.FOLLOWS) -> None:
-    app.handle(
-        {
-            "action": "link",
-            "params": {
-                "source": source,
-                "target": target,
-                "type": edge_type.value,
-            },
-        }
-    )
-
-
-def build_reference_index(
-    app: VirtualLabApp,
-    subtask_id: str,
-    reference_assets: Dict[str, DataEntry],
+def plan_reference_stage(
+    subtask: SubtaskHandle,
+    references: Mapping[str, RegisteredAsset],
     output_dir: Path,
-) -> StageResult:
-    reference_fasta = reference_assets["mm39.fa"].resolved
-    annotation = reference_assets.get("mm39.ncbiRefSeq.gtf")
+) -> ReferenceStage:
+    genome = references["mm39.fa"].asset
+    annotation = references.get("mm39.ncbiRefSeq.gtf")
+
     index_dir = output_dir / "indices" / "HISAT2_mm39"
     index_dir.mkdir(parents=True, exist_ok=True)
+
     inputs = {
-        "reference_fasta": str(reference_fasta),
-        # "annotation_gtf": str(annotation.resolved if annotation else ""),
+        "reference_fasta": str(genome.path),
+        "annotation_gtf": str(annotation.asset.path) if annotation else "",
         "output_dir": str(index_dir),
-        # "sjdb_overhang": 100,
     }
-    index_step, index_response = add_step(
-        app,
-        subtask_id=subtask_id,
+    step = subtask.add_step(
         name="Build HISAT2 index",
         tool="HISAT2",
         inputs=inputs,
         labels=["indexing", "reference"],
     )
-    return StageResult(
-        anchor_step=index_step,
-        steps={"primary": index_step},
-        artifacts={"primary": index_dir, "raw_response": index_response},
-        order=[index_step],
-    )
+    return ReferenceStage(index_step=step, index_dir=index_dir)
 
 
-def plan_sample_workflow(
+def plan_sample_pipeline(
     app: VirtualLabApp,
-    sample: SampleEntry,
-    subtask_id: str,
-    adapter: DataEntry,
-    reference_fasta: DataEntry,
-    annotation: DataEntry | None,
-    upstream_stage: StageResult,
+    sample: DataAsset,
+    subtask: SubtaskHandle,
+    adapter: DataAsset,
+    annotation: DataAsset | None,
+    reference_stage: ReferenceStage,
     output_dir: Path,
-) -> SampleWorkflowResult:
-    """Create per-sample steps while depending on a prior planning stage."""
-
-    sample_dir = output_dir / sample.group / sample.sample_id
+) -> SamplePlan:
+    group = sample.experimental_group()
+    sample_dir = output_dir / group / sample.sample_id()
     qc_dir = sample_dir / "qc"
     trim_dir = sample_dir / "trimmed"
     align_dir = sample_dir / "alignment"
     quant_dir = sample_dir / "counts"
-    for path in (qc_dir, trim_dir, align_dir, quant_dir):
-        path.mkdir(parents=True, exist_ok=True)
+    for directory in (qc_dir, trim_dir, align_dir, quant_dir):
+        directory.mkdir(parents=True, exist_ok=True)
 
-    qc_step, qc_response = add_step(
-        app,
-        subtask_id=subtask_id,
-        name=f"QC {sample.data.name}",
+    steps: list[StepHandle] = []
+
+    qc_step = subtask.add_step(
+        name=f"QC {sample.name}",
         tool="fastqc",
-        inputs={"reads": str(sample.data.resolved), "output_dir": str(qc_dir)},
-        labels=["qc", sample.group.lower()],
+        inputs={"reads": str(sample.path), "output_dir": str(qc_dir)},
+        labels=["qc", group.lower()],
     )
+    steps.append(qc_step)
 
-    trimmed_fastq = trim_dir / f"{sample.sample_id}.trimmed.fastq.gz"
-    trim_step, trim_response = add_step(
-        app,
-        subtask_id=subtask_id,
-        name=f"Trim adapters {sample.data.name}",
+    trimmed_fastq = trim_dir / f"{sample.sample_id()}.trimmed.fastq.gz"
+    trim_step = subtask.add_step(
+        name=f"Trim adapters {sample.name}",
         tool="cutadapt",
         inputs={
-            "reads": str(sample.data.resolved),
-            "adapter_fasta": str(adapter.resolved),
+            "reads": str(sample.path),
+            "adapter_fasta": str(adapter.path),
             "output_fastq": str(trimmed_fastq),
         },
-        labels=["cutadapt", sample.group.lower()],
+        labels=["cutadapt", group.lower()],
     )
-    link_steps(app, qc_step, trim_step)
+    steps.append(trim_step)
+    app.link(source=qc_step, target=trim_step, type=EdgeType.FOLLOWS)
 
-    bam_path = align_dir / f"{sample.sample_id}.bam"
-    align_step, align_response = add_step(
-        app,
-        subtask_id=subtask_id,
-        name=f"Align {sample.data.name}",
+    bam_path = align_dir / f"{sample.sample_id()}.bam"
+    align_step = subtask.add_step(
+        name=f"Align {sample.name}",
         tool="hisat2",
         inputs={
             "reads": str(trimmed_fastq),
             "reference_genome_index": "find the related HISAT2 index file under the data or output directory by yourself",
-            "annotation_gtf": str(annotation.resolved if annotation else ""),
+            "annotation_gtf": str(annotation.path) if annotation else "",
             "output_bam": str(bam_path),
             "aligner": "HISAT2",
         },
-        labels=["alignment", sample.group.lower()],
+        labels=["alignment", group.lower()],
     )
-    link_steps(app, trim_step, align_step)
-    link_steps(app, upstream_stage.primary_step(), align_step, edge_type=EdgeType.DEPENDS_ON)
+    steps.append(align_step)
+    app.link(source=trim_step, target=align_step, type=EdgeType.FOLLOWS)
+    app.link(source=reference_stage.index_step, target=align_step, type=EdgeType.DEPENDS_ON)
 
-    counts_file = quant_dir / f"{sample.sample_id}.featureCounts.txt"
-    quant_step, quant_response = add_step(
-        app,
-        subtask_id=subtask_id,
-        name=f"Quantify {sample.data.name}",
+    counts_file = quant_dir / f"{sample.sample_id()}.featureCounts.txt"
+    quant_step = subtask.add_step(
+        name=f"Quantify {sample.name}",
         tool="featureCounts",
         inputs={
             "bam": str(bam_path),
-            "annotation_gtf": str(annotation.resolved if annotation else ""),
+            "annotation_gtf": str(annotation.path) if annotation else "",
             "output_table": str(counts_file),
         },
-        labels=["quantification", sample.group.lower()],
+        labels=["quantification", group.lower()],
     )
-    link_steps(app, align_step, quant_step)
-    return SampleWorkflowResult(
-        sample=sample,
-        steps=[qc_step, trim_step, align_step, quant_step],
-        terminal_step=quant_step,
-        counts_file=counts_file,
-    )
+    steps.append(quant_step)
+    app.link(source=align_step, target=quant_step, type=EdgeType.FOLLOWS)
+
+    return SamplePlan(sample=sample, group=group, steps=steps, counts_table=counts_file)
 
 
 def plan_differential_expression(
     app: VirtualLabApp,
-    subtask_id: str,
-    upstream_samples: Iterable[SampleWorkflowResult],
+    subtask: SubtaskHandle,
+    sample_plans: Sequence[SamplePlan],
     output_dir: Path,
-) -> StageResult:
-    """Add post-sample steps that consume upstream sample workflows."""
-
-    results = list(upstream_samples)
-    if not results:
-        return StageResult(anchor_step="", steps={}, artifacts={})
+) -> DifferentialExpressionPlan | None:
+    if not sample_plans:
+        return None
 
     de_dir = output_dir / "differential_expression"
     de_dir.mkdir(parents=True, exist_ok=True)
+
     matrix_path = de_dir / "counts_matrix.tsv"
     de_table_path = de_dir / "differential_expression.tsv"
 
     counts_inputs = {
-        "counts_files": {res.sample.sample_id: str(res.counts_file) for res in results},
+        "counts_files": {plan.sample.sample_id(): str(plan.counts_table) for plan in sample_plans},
         "output_matrix": str(matrix_path),
     }
-    counts_step, counts_response = add_step(
-        app,
-        subtask_id=subtask_id,
+    counts_step = subtask.add_step(
         name="Assemble counts matrix",
         tool="pandas",
         inputs=counts_inputs,
         labels=["quantification", "aggregation"],
     )
+    for plan in sample_plans:
+        app.link(source=plan.terminal_step, target=counts_step, type=EdgeType.DEPENDS_ON)
 
-    for res in results:
-        link_steps(app, res.terminal_step, counts_step, edge_type=EdgeType.DEPENDS_ON)
-
-    sample_groups = {res.sample.sample_id: res.sample.group for res in results}
+    group_map = {plan.sample.sample_id(): plan.group for plan in sample_plans}
     de_inputs = {
         "counts_matrix": str(matrix_path),
-        "sample_groups": sample_groups,
+        "sample_groups": group_map,
         "test_design": {"control": "LoGlu", "treatment": "HiGlu"},
         "output_table": str(de_table_path),
     }
-    de_step, de_response = add_step(
-        app,
-        subtask_id=subtask_id,
+    de_step = subtask.add_step(
         name="Differential expression analysis",
         tool="R script: DESeq2",
         inputs=de_inputs,
         labels=["differential-expression"],
     )
-    link_steps(app, counts_step, de_step)
+    app.link(source=counts_step, target=de_step, type=EdgeType.FOLLOWS)
 
-    return StageResult(
-        anchor_step=de_step,
-        steps={"aggregation": counts_step, "primary": de_step},
-        artifacts={
-            "primary": de_table_path,
-            "counts_matrix": matrix_path,
-        },
-        order=[counts_step, de_step],
+    return DifferentialExpressionPlan(
+        counts_step=counts_step,
+        differential_step=de_step,
+        matrix_path=matrix_path,
+        results_path=de_table_path,
     )
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def _build_execution_prompt(step: NodeSpec, history_res: str) -> str:
-    """Create a textual prompt describing how to execute ``step``."""
-
+def build_execution_prompt(step: NodeSpec, history: str) -> str:
     name = step.attributes.get("name", "")
     tool = step.attributes.get("tool", "")
     inputs = step.attributes.get("inputs", {})
@@ -449,133 +368,126 @@ def _build_execution_prompt(step: NodeSpec, history_res: str) -> str:
         "3. Ensure the expected output artefacts are created at the paths listed in the inputs.",
         "4. Use shell commands (via the bash tool) or lightweight Python scripts when external tools are missing.",
         "5. At the end, summarise the actions taken and key results produced.",
-        "6. If the step is related to the previous steps, you should use the history_res to help you to execute the step.",
+        "6. If the step is related to the previous steps, use the history summary to provide context.",
         "History result summary:",
-        history_res,
+        history,
     ]
     return "\n".join(instructions)
 
 
-def _execute_steps(app: VirtualLabApp, step_ids: Iterable[str]) -> None:
-    """Execute each step in ``step_ids`` sequentially using the Engineer runner."""
-    history_res = ""
-    for step_id in step_ids:
-        step = app.graph_store.get_node(step_id)
-        if step is None or step.type is not NodeType.STEP:
-            print(f"Skipping execution for unknown step: {step_id}")
-            continue
-        prompt = _build_execution_prompt(step, history_res)
-        print(f"Executing step {step_id} ({step.attributes.get('name', '')}) using Engineer runner")
+def execute_steps(app: VirtualLabApp, steps: Sequence[StepHandle]) -> None:
+    history_summary = ""
+    for handle in steps:
+        step_node = handle.node()
+        prompt = build_execution_prompt(step_node, history_summary)
+        print(f"Executing {step_node.id} ({step_node.attributes.get('name', '')})")
         payload = {"text": prompt, "tools": ["shell_bash"]}
         try:
-            response = app.handle(
-                {
-                    "action": "run_step",
-                    "params": {"step_id": step_id, "tool": "engineer", "payload": payload},
-                }
-            )
+            response = app.run_step(step=handle, tool="engineer", payload=payload)
         except Exception as exc:  # pragma: no cover - runtime safety
-            print(f"Execution failed for step {step_id}: {exc}")
+            print(f"Execution failed for {step_node.id}: {exc}")
             continue
         result = response.get("result", {})
         status = result.get("status", "unknown")
-        print(f"Step {step_id} execution status: {status}")
+        print(f"  status: {status}")
+        if result.get("brief_output"):
+            history_summary += str(result["brief_output"])
         if result.get("output"):
-            print(f"Step {step_id} output: {result['output']}")
-            history_res += str(result['brief_output'])
-    return history_res
+            print(f"  output: {result['output']}")
 
 
-def main() -> None:
+def summarise_plan(
+    plan: PlanHandle,
+    references: Mapping[str, RegisteredAsset],
+    sample_plans: Sequence[SamplePlan],
+    de_plan: DifferentialExpressionPlan | None,
+) -> None:
+    print("RNA-seq analysis plan successfully created")
+    print(f"Plan ID: {plan.id}")
+    print("Registered reference assets:")
+    for name, registered in sorted(references.items()):
+        status = "available" if registered.asset.exists() else "missing"
+        print(f"  - {name}: {registered.data_id} ({status})")
+
+    print("Sample step overview:")
+    for plan_entry in sorted(sample_plans, key=lambda item: item.sample.sample_id()):
+        step_ids = [step.id for step in plan_entry.steps]
+        print(
+            f"  - {plan_entry.sample.sample_id()} ({plan_entry.group}): "
+            f"{len(step_ids)} steps -> {', '.join(step_ids)}"
+        )
+
+    if de_plan:
+        print("Differential expression steps:")
+        print(f"  - counts matrix: {de_plan.counts_step.id}")
+        print(f"  - differential expression: {de_plan.differential_step.id}")
+
+    timeline = plan.timeline(
+        include=[NodeType.SUBTASK.value, NodeType.STEP.value, NodeType.DATA.value]
+    )
+    print("\nPlan timeline excerpt:")
+    print(json.dumps(timeline[:10], indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(execute: bool = False) -> None:
     case_dir = Path(__file__).resolve().parent
     config = load_case_config(case_dir / "case_config.yaml")
+    assets = load_assets(config, case_dir)
 
-    data_entries = [
-        DataEntry(relative_path=relative, description=desc, resolved=(case_dir / relative).resolve())
-        for relative, desc in config["data_list"].items()
-    ]
+    reference_assets = [asset for asset in assets if not asset.is_fastq()]
+    sample_assets = [asset for asset in assets if asset.is_fastq()]
 
     app = VirtualLabApp()
-    plan_id = create_plan(app, config)
-    print(f"plan_id: {plan_id}")
-    subtasks = ensure_subtasks(app, plan_id)
-    print(f"subtasks: {subtasks}")
+    plan = create_plan(app, config)
 
-    reference_entries = {entry.name: entry for entry in data_entries if not entry.is_fastq()}
-    print(f"reference_entries: {reference_entries}")
-    reference_ids = register_reference_data(app, plan_id, reference_entries.values())
-    print(f"reference_ids: {reference_ids}")
+    references = register_references(plan, reference_assets)
+    subtasks = create_subtasks(plan)
 
-    output_dir = (case_dir / config.get("output_dir", "output")).resolve()
-    print(f"output_dir: {output_dir}")
+    output_dir = (case_dir / str(config.get("output_dir", "output"))).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    reference_subtask_id = subtasks["Prepare reference assets"]
-    print(f"reference_subtask_id: {reference_subtask_id}")
-    reference_stage = build_reference_index(app, reference_subtask_id, reference_entries, output_dir)
-    print(f"reference_stage: {reference_stage}")
+    reference_stage = plan_reference_stage(subtasks["reference"], references, output_dir)
 
-    adapter_entry = reference_entries["TruSeq3-SE.fa"]
-    print(f"adapter_entry: {adapter_entry}")
-    reference_fasta_entry = reference_entries["mm39.fa"]
-    print(f"reference_fasta_entry: {reference_fasta_entry}")
-    annotation_entry = reference_entries.get("mm39.ncbiRefSeq.gtf")
-    print(f"annotation_entry: {annotation_entry}")
+    adapter_asset = references.get("TruSeq3-SE.fa")
+    if adapter_asset is None:
+        raise KeyError("TruSeq3-SE.fa must be defined in case_config.yaml")
+    annotation_asset = references.get("mm39.ncbiRefSeq.gtf")
 
-    samples_by_group: Dict[str, List[SampleEntry]] = defaultdict(list)
-    for entry in data_entries:
-        if not entry.is_fastq():
-            continue
-        group = "LoGlu" if "LoGlu" in entry.description else "HiGlu"
-        samples_by_group[group].append(SampleEntry(entry, group))
-    print(f"samples_by_group: {samples_by_group}")
+    sample_plans: list[SamplePlan] = []
+    for asset in sample_assets:
+        group = asset.experimental_group()
+        subtask = subtasks.get(group)
+        if subtask is None:
+            raise KeyError(f"No subtask registered for group '{group}'")
+        plan_entry = plan_sample_pipeline(
+            app=app,
+            sample=asset,
+            subtask=subtask,
+            adapter=adapter_asset.asset,
+            annotation=annotation_asset.asset if annotation_asset else None,
+            reference_stage=reference_stage,
+            output_dir=output_dir,
+        )
+        sample_plans.append(plan_entry)
 
-    created_steps: Dict[str, List[str]] = {}
-    sample_results: List[SampleWorkflowResult] = []
-    for group, samples in samples_by_group.items():
-        subtask_id = subtasks[f"{group} replicate alignment"]
-        for sample in samples:
-            result = plan_sample_workflow(
-                app,
-                sample,
-                subtask_id,
-                adapter_entry,
-                reference_fasta_entry,
-                annotation_entry,
-                reference_stage,
-                output_dir,
-            )
-            created_steps[sample.sample_id] = result.steps
-            sample_results.append(result)
-    print(f"created_steps: {created_steps}")
+    de_plan = plan_differential_expression(app, subtasks["de"], sample_plans, output_dir)
 
-    de_subtask_id = subtasks["Differential expression analysis"]
-    de_stage = plan_differential_expression(app, de_subtask_id, sample_results, output_dir)
-    print(f"de_stage: {de_stage}")
+    summarise_plan(plan, references, sample_plans, de_plan)
 
-    execution_order = reference_stage.ordered_steps()
-    execution_order.extend(step_id for res in sample_results for step_id in res.steps)
-    execution_order.extend(de_stage.ordered_steps())
-
-    print("RNA-seq analysis plan successfully created")
-    print(f"Plan ID: {plan_id}")
-    print(f"Registered reference assets: {sorted(reference_ids)}")
-    print("Sample step overview:")
-    for sample_id, steps in sorted(created_steps.items()):
-        print(f"  - {sample_id}: {len(steps)} steps ({', '.join(steps)})")
-    if de_stage:
-        print("Differential expression steps:")
-        for name, step_id in de_stage.steps.items():
-            print(f"  - {name}: {step_id}")
-
-    # Convert NodeDataView/EdgeDataView to list before json serialization
-    print(f"app.graph_store.graph nodes: {json.dumps(list(app.graph_store.graph.nodes(data=True)), indent=2)}")
-
-    if execution_order:
+    if execute:
+        execution_steps: list[StepHandle] = [reference_stage.index_step]
+        for plan_entry in sample_plans:
+            execution_steps.extend(plan_entry.steps)
+        if de_plan:
+            execution_steps.extend([de_plan.counts_step, de_plan.differential_step])
         print("\nStarting execution of planned steps using Engineer...")
-        print(_execute_steps(app, execution_order))
-    # print(f"app.graph_store.graph edges: {json.dumps(list(app.graph_store.graph.edges(data=True)), indent=2)}")
+        execute_steps(app, execution_steps)
 
 
 if __name__ == "__main__":
-    main()
+    main(execute="--execute" in sys.argv)
