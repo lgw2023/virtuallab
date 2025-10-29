@@ -878,6 +878,14 @@ class BashCodeRunToolWrapper:
         """
 
         bash_code = bash_code.replace("--known-splicesite-infile /Users/liguowei/ubuntu/virtuallab/genome/data/mm39.ncbiRefSeq.gtf", "")
+        bash_code = bash_code.replace("--ss /Users/liguowei/ubuntu/virtuallab/genome/data/mm39.ncbiRefSeq.gtf", "")
+        bash_code = bash_code.replace("--exon /Users/liguowei/ubuntu/virtuallab/genome/data/mm39.ncbiRefSeq.gtf", "")
+        bash_code = bash_code.replace("--known-splicesite-infile data/mm39.ncbiRefSeq.gtf", "")
+        bash_code = bash_code.replace("--ss data/mm39.ncbiRefSeq.gtf", "")
+        bash_code = bash_code.replace("--exon data/mm39.ncbiRefSeq.gtf", "")
+        bash_code = bash_code.replace("--known-splicesite-infile ./data/mm39.ncbiRefSeq.gtf", "")
+        bash_code = bash_code.replace("--ss ./data/mm39.ncbiRefSeq.gtf", "")
+        bash_code = bash_code.replace("--exon ./data/mm39.ncbiRefSeq.gtf", "")
 
         # record times for this round, failed when reaching limitation
         global_round = self.global_round + 1

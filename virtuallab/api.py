@@ -603,7 +603,6 @@ class VirtualLabApp:
 
         raw_payload = dict(payload or {})
         execution_details = self.step_runner.run(tool=chosen_tool, step_id=step_id, payload=raw_payload)
-        print(f"execution_details: {json.dumps(execution_details, indent=2, ensure_ascii=False)}")
         execution_record = dict(execution_details)
         execution_record.setdefault("step_id", step_id)
         execution_record.setdefault("tool", chosen_tool)

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import sys
-
+from xmlrpc.client import Fault
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -151,7 +153,7 @@ def load_assets(config: CaseConfig, case_dir: Path) -> list[DataAsset]:
     assets: list[DataAsset] = []
     for relative, desc in data_list.items():
         resolved = (case_dir / relative).resolve()
-        assets.append(DataAsset(source=str(relative), description=str(desc), path=resolved))
+        assets.append(DataAsset(source=str(relative), description=str(desc), path=Path(relative)))
     return assets
 
 
@@ -369,32 +371,38 @@ def build_execution_prompt(step: NodeSpec, history: str) -> str:
         "4. Use shell commands (via the bash tool) or lightweight Python scripts when external tools are missing.",
         "5. At the end, summarise the actions taken and key results produced.",
         "6. If the step is related to the previous steps, use the history summary to provide context.",
-        "History result summary:",
-        history,
+
     ]
+    if history:
+        instructions.extend(["History result summary:", history,])
     return "\n".join(instructions)
 
 
-def execute_steps(app: VirtualLabApp, steps: Sequence[StepHandle]) -> None:
-    history_summary = ""
+def execute_steps(app: VirtualLabApp, steps: Sequence[StepHandle], history: str) -> str:
+    history_summary = "" if not history else history
+    result = defaultdict()
     for handle in steps:
         step_node = handle.node()
         prompt = build_execution_prompt(step_node, history_summary)
-        print(f"Executing {step_node.id} ({step_node.attributes.get('name', '')})")
+        print(f"Executing {step_node.id} ({step_node.attributes.get('name', '')})\nprompt: {prompt}")
         payload = {"text": prompt, "tools": ["shell_bash"]}
         try:
             response = app.run_step(step=handle, tool="engineer", payload=payload)
         except Exception as exc:  # pragma: no cover - runtime safety
             print(f"Execution failed for {step_node.id}: {exc}")
             continue
+        try:
+            print(f"response: {json.dumps(response, ensure_ascii=False)}")
+        except:
+            print(f"response: {response}")
         result = response.get("result", {})
         status = result.get("status", "unknown")
-        print(f"  status: {status}")
+        assert result.get("brief_output")
         if result.get("brief_output"):
             history_summary += str(result["brief_output"])
         if result.get("output"):
             print(f"  output: {result['output']}")
-
+    return str(result["brief_output"])
 
 def summarise_plan(
     plan: PlanHandle,
@@ -435,12 +443,16 @@ def summarise_plan(
 
 
 def main(execute: bool = False) -> None:
-    case_dir = Path(__file__).resolve().parent
+    os.chdir('/Users/liguowei/ubuntu/virtuallab/genome')
+    case_dir = Path("") # Path(__file__).resolve().parent
     config = load_case_config(case_dir / "case_config.yaml")
     assets = load_assets(config, case_dir)
+    print(f"assets: {assets}")
 
     reference_assets = [asset for asset in assets if not asset.is_fastq()]
     sample_assets = [asset for asset in assets if asset.is_fastq()]
+    print(f"reference_assets: {reference_assets}")
+    print(f"sample_assets: {sample_assets}")
 
     app = VirtualLabApp()
     plan = create_plan(app, config)
@@ -448,7 +460,7 @@ def main(execute: bool = False) -> None:
     references = register_references(plan, reference_assets)
     subtasks = create_subtasks(plan)
 
-    output_dir = (case_dir / str(config.get("output_dir", "output"))).resolve()
+    output_dir = case_dir / str(config.get("output_dir", "output")) # (case_dir / str(config.get("output_dir", "output"))).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     reference_stage = plan_reference_stage(subtasks["reference"], references, output_dir)
@@ -480,14 +492,13 @@ def main(execute: bool = False) -> None:
     summarise_plan(plan, references, sample_plans, de_plan)
 
     if execute:
-        execution_steps: list[StepHandle] = [reference_stage.index_step]
-        for plan_entry in sample_plans:
-            execution_steps.extend(plan_entry.steps)
-        if de_plan:
-            execution_steps.extend([de_plan.counts_step, de_plan.differential_step])
         print("\nStarting execution of planned steps using Engineer...")
-        execute_steps(app, execution_steps)
+        history = execute_steps(app, [reference_stage.index_step], "")
+        for plan_entry in sample_plans:
+            history += execute_steps(app, plan_entry.steps, history)
+        if de_plan:
+            history += execute_steps(app, [de_plan.counts_step, de_plan.differential_step], history)
 
 
 if __name__ == "__main__":
-    main(execute="--execute" in sys.argv)
+    main(execute=True)

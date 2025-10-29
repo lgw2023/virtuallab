@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, Iterable, Protocol
 
 from ...config import get_env
 
-
 def _load_smolagents_dependencies() -> dict[str, Any]:
     """Import smolagents lazily and surface a clear error when missing."""
 
@@ -31,9 +30,8 @@ def _load_smolagents_dependencies() -> dict[str, Any]:
 class EngineerClient(Protocol):
     """Minimal protocol describing the Engineer agent interface."""
 
-    def run(self, prompt: str, *, tools: list[str] | None = None) -> str:
+    def run(self, prompt: str, *, tools: list[str] | None = None) -> dict:
         """Execute ``prompt`` using the Engineer agent."""
-
 
 @dataclass
 class SmolagentsEngineerClient:
@@ -108,34 +106,29 @@ class SmolagentsEngineerClient:
             )
             try:
                 full_result = agent.run(prompt, return_full_result=True)
-                result = full_result.output
-                brief_info = f"""
-                please extract the brief information from the following full result.
-                the brief information should be in a concise, readable and the following format:
-                {{
-                    "task step": <goal and action of the task step in one sentence>,
-                    "tools used": <list ofkey tools used in the task step>,
-                    "resulted files": <list of key resulted files>
-                }}
-                """
-                prompt = """
-                Here is the full result:
-                """ + str(full_result.steps)
-                from .openai_model import openai_complete
-                brief_output = openai_complete(prompt, system_prompt=brief_info)
+                brief_output = self.model.generate(messages=[
+                    {'role': 'system', 'content': """
+please extract the brief information from the following full result.
+the brief information should be in a concise, readable and the following format:
+{
+    "task step": <goal and action of the task step in one sentence, as brief as possible>,
+    "tools used": <list of key tools used in the task step, as less as possible>,
+    "resulted files": <list full path oraf key resulted files, as less as possible>
+}
+"""
+                     },
+                    {'role': 'user', 'content': "Here is the full result:\n" + str(full_result.steps)}])
+
             except Exception as exc:  # pragma: no cover - network failures
                 last_error = exc
                 if attempt == 0 and attempts > 1:
                     self._proxy_url = None
                     self.model = self._create_default_model(proxy_url=None)
                     continue
-                # return str(exc)
                 return {"full_result": str(exc), "brief_result": str(exc)}
+            return {"full_result": full_result.output, "brief_result": brief_output.content}
 
-            return {"full_result": result, "brief_result": brief_output}
-
-        # return "" if last_error is None else str(last_error)
-        return {"full_result": "", "brief_result": ""} if last_error is None else {"full_result": str(last_error), "brief_result": str(last_error)} 
+        return {"full_result": "", "brief_result": ""} if last_error is None else {"full_result": str(last_error), "brief_result": str(last_error)}
 
 
 @dataclass
@@ -150,5 +143,4 @@ class EngineerAdapter:
         prompt: str = payload.get("text", "")
         tools = payload.get("tools") or []
         output = self.client.run(prompt, tools=tools)
-
         return {"step_id": step_id, "output": output["full_result"], "brief_output": output["brief_result"], "tools": tools}
